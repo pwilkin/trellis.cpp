@@ -53,8 +53,10 @@ last key-tile at the HR token count, ≈53k). BiRefNet bg-removal is done (M2); 
 ## M5 — Stage ③ Texture + finish
 - ☑ SLatFlowModel imgshape2tex forward + sampling → texture latent (concat shape slat)
 - ☑ Sparse U-Net tex decoder → 6-ch PBR per voxel (replays shape decoder's subdiv masks)
-- ☑ Bake PBR onto mesh: decimate (vertex cluster) → xatlas UV → atlas raster + seam dilation →
-      textured GLB (PBR baseColor + metallicRoughness, embedded PNG)
+- ☑ Bake PBR onto mesh: decimate (vertex cluster) → UV unwrap → atlas raster + seam dilation →
+      textured GLB (PBR baseColor + metallicRoughness, embedded PNG). Default unwrap is the O(F)
+      6-way box projection (seconds); `TRELLIS_XATLAS=1` uses xatlas (tighter packing, ~superlinear
+      in faces and only ~2-core even multithreaded, so much slower)
 - ☑ 512→1024 cascade (LR flow_512 → upsample → quantize res64 → HR flow_1024 → decode res1024);
       needed the FlashAttention + padded-K/V fix (M1) to fit VRAM and keep the HR flow finite
 

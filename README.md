@@ -26,13 +26,15 @@ Target acceptance test: generate a 3D asset from the prompt
 > ./build/trellis-cli assets/goblin.png out/goblin.glb      # image -> UV-textured GLB (atlas + PBR)
 > python tools/render_glb.py out/goblin.glb out/view.png    # quick multi-view render
 > ```
-> By default the mesh is decimated (vertex clustering) then unwrapped with xatlas; per-vertex PBR
-> (base color + metallic/roughness from the tex decoder) is baked into the atlas. Env knobs:
-> `TRELLIS_512=1` (res-512 path), `TRELLIS_NOTEX=1` (skip texturing), `TRELLIS_DECIM=<grid>`,
-> `TRELLIS_TEX=<atlas>`, `TRELLIS_BOXUV=1` (voxel-native 6-way box-projection atlas on the **full**
-> undecimated mesh — O(faces), no xatlas chart computation; keeps all res-1024 detail),
-> `TRELLIS_BIREFNET=1` (BiRefNet background removal instead of the white-bg threshold — for images with
-> real backgrounds; full Swin-L + deformable-conv decoder on GPU, ~13s).
+> The mesh is cluster-decimated (vertex clustering, to the tri budget) then UV-unwrapped. **The
+> default unwrap is a voxel-native 6-way box projection** (O(faces), seconds): xatlas chart-compute
+> is ~superlinear in faces and only spreads across ~2 cores even though it's multithreaded, so it
+> used to dominate the bake (minutes). Per-vertex PBR (base color + metallic/roughness from the tex
+> decoder) is baked into the atlas. Env knobs: `TRELLIS_512=1` (res-512 path), `TRELLIS_NOTEX=1`
+> (skip texturing), `TRELLIS_DECIM=<grid>` (`0` = no decimation, keep the full res-1024 mesh),
+> `TRELLIS_TEX=<atlas>`, `TRELLIS_XATLAS=1` (decimate→xatlas unwrap instead — tighter UV packing,
+> much slower), `TRELLIS_BIREFNET=1` (BiRefNet background removal instead of the white-bg threshold —
+> for images with real backgrounds; full Swin-L + deformable-conv decoder on GPU, ~13s).
 > Every neural component is validated against PyTorch (the `trellis-test-*` binaries + `tools/ref_*.py`):
 > SS sampler matches torch to rel 4.3e-3 (exact voxel match), DiT 2.8e-3, DINOv3 1.8e-2, sparse conv 1e-3,
 > C2S exact. f16 is the default and matches torch fine (the earlier "needs f32" was a graph-input-reuse

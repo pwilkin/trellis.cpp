@@ -222,20 +222,21 @@ int main(int argc, char** argv) {
     printf("[7/7] write %s\n", outglb.c_str());
     bool textured = false;
     if (!pbr6.empty()) {   // UV-baked textured GLB (PBR material)
-        const bool boxuv = getenv("TRELLIS_BOXUV");   // voxel-native box atlas on the FULL mesh (no xatlas)
-        const int T = getenv("TRELLIS_TEX") ? atoi(getenv("TRELLIS_TEX")) : (boxuv ? 4096 : (cascade ? 1536 : 1024));
-        trellis::BakedMesh bm;
-        if (boxuv) {
-            // 6-way box projection: O(F), keeps the full res-1024 detail, no decimation/xatlas
-            bm = trellis::uv_box_project(mesh.verts, mesh.V(), mesh.faces, mesh.F(), pbr6, T);
-        } else {
-            // cluster grid: bump for the cascade to keep extra sharpness, but cap at 256 — xatlas
-            // chart-compute is ~superlinear in faces (grid 384 -> 382K faces hung >9min; 256 -> ~170K)
-            const int dg = getenv("TRELLIS_DECIM") ? atoi(getenv("TRELLIS_DECIM")) : (cascade ? 256 : 192);
-            std::vector<float> dv, dp; std::vector<int32_t> df;
-            trellis::decimate_cluster(mesh.verts, mesh.V(), mesh.faces, mesh.F(), pbr6, dg, dv, df, dp);
-            bm = trellis::uv_bake(dv, (int)dv.size()/3, df, (int)df.size()/3, dp, T);
-        }
+        // UV method: default to the voxel-native 6-way box projection (uv_box_project) — O(F), no
+        // xatlas. xatlas chart-compute is ~superlinear in faces (grid 384 -> 382K faces hung >9min)
+        // and only spreads across ~2 cores even though it's multithreaded, so it dominated the bake
+        // (minutes); box projection is seconds. TRELLIS_XATLAS=1 restores xatlas for tighter packing.
+        const bool boxuv = !getenv("TRELLIS_XATLAS");
+        const int T = getenv("TRELLIS_TEX") ? atoi(getenv("TRELLIS_TEX")) : (cascade ? 1536 : 1024);
+        // Cluster-decimate to the tri budget first either way (props rely on TRELLIS_DECIM for this);
+        // TRELLIS_DECIM=0 keeps the full res-1024 mesh (pair with a larger TRELLIS_TEX for detail).
+        const int dg = getenv("TRELLIS_DECIM") ? atoi(getenv("TRELLIS_DECIM")) : (cascade ? 256 : 192);
+        std::vector<float> dv, dp; std::vector<int32_t> df;
+        if (dg > 0) trellis::decimate_cluster(mesh.verts, mesh.V(), mesh.faces, mesh.F(), pbr6, dg, dv, df, dp);
+        else { dv = mesh.verts; df = mesh.faces; dp = pbr6; }
+        const int dV = (int)dv.size()/3, dF = (int)df.size()/3;
+        trellis::BakedMesh bm = boxuv ? trellis::uv_box_project(dv, dV, df, dF, dp, T)
+                                      : trellis::uv_bake(dv, dV, df, dF, dp, T);
         if (bm.ok()) {
             trellis::write_glb_textured(outglb.c_str(), bm.verts.data(), (int64_t)bm.verts.size()/3, bm.uv.data(),
                                         bm.faces.data(), (int64_t)bm.faces.size()/3, bm.base.data(), bm.mr.data(), bm.T);
