@@ -1,0 +1,28 @@
+# build artifacts
+/build/
+*.o
+*.a
+*.so
+
+# vendored deps (kept out of history; cloned by setup)
+/thirdparty/ggml/
+
+# models & weights live on D_SSD, never in the repo
+*.gguf
+*.safetensors
+*.bin
+/models/*
+!/models/.gitkeep
+
+# python / venv
+__pycache__/
+*.pyc
+.venv/
+
+# editor / tooling caches
+/.cache/
+
+# scratch
+/out/
+*.glb
+*.tmp
