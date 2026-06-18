@@ -14,9 +14,13 @@ Target acceptance test: generate a 3D asset from the prompt
 > Status: **complete end-to-end** — bg removal, conditioning, all three flows, VAE decoders, mesh +
 > UV-textured PBR export, 1024 cascade, and BiRefNet background removal all run in native C++/GGML.
 > `trellis-cli <image.png> <out.glb>` produces a **UV-textured GLB with a PBR material** — a green
-> goblin with a silver metal helmet and spiked club. Default is the **1024 cascade** (sharper
-> geometry, ~150s f16); `TRELLIS_512=1` uses the faster res-512 path (~90s). Every neural component is
-> validated against PyTorch (BiRefNet matches to rel 4e-4). See [ROADMAP.md](ROADMAP.md) and `docs/spec/`.
+> goblin with a silver metal helmet and spiked club. Default is the **1024 cascade** (LR `flow_512`
+> → upsample → HR `flow_1024` → res-1024 decode, sharper geometry); `TRELLIS_512=1` selects the
+> lighter res-512 path. The cascade runs on a 16 GB card thanks to **FlashAttention with padded K/V**
+> (`src/dit.cpp::sdpa`): the manual softmax needed a single ~18 GB score-matrix alloc at the
+> sparse-structure stage, and at the HR token count (≈53k) ggml's tiled FA NaN'd on the unpadded last
+> key-tile — zero-padding K/V to a 256 multiple + BF16 fixes both. Every neural component is validated
+> against PyTorch (BiRefNet matches to rel 4e-4). See [ROADMAP.md](ROADMAP.md) and `docs/spec/`.
 >
 > ```
 > ./build/trellis-cli assets/goblin.png out/goblin.glb      # image -> UV-textured GLB (atlas + PBR)
@@ -69,8 +73,8 @@ Downloaded to `/media/ilintar/D_SSD/models/trellis2/` (the repo never stores wei
 | role | source | notes |
 |------|--------|-------|
 | SS flow DiT | `microsoft/TRELLIS.2-4B` `ss_flow_img_dit_1_3B_64` | 1.3B, bf16 |
-| Shape SLAT flow | `…/slat_flow_img2shape_dit_1_3B_512` | 1.3B, bf16 |
-| Tex SLAT flow | `…/slat_flow_imgshape2tex_dit_1_3B_512` | 1.3B, bf16 |
+| Shape SLAT flow | `…/slat_flow_img2shape_dit_1_3B_{512,1024}` | 1.3B, bf16; `_1024` drives the cascade's HR pass |
+| Tex SLAT flow | `…/slat_flow_imgshape2tex_dit_1_3B_{512,1024}` | 1.3B, bf16; `_1024` drives the cascade's HR pass |
 | Shape decoder | `…/shape_dec_next_dc_f16c32` | FlexiDualGrid VAE |
 | Tex decoder | `…/tex_dec_next_dc_f16c32` | Sparse U-Net VAE, 6-ch |
 | SS decoder | `microsoft/TRELLIS-image-large` `ss_dec_conv3d_16l8` | reused from v1 |
@@ -92,10 +96,10 @@ cmake --build build -j
 ## Layout
 
 ```
-src/        C++ implementation (models, ops, pipeline, drivers)
-include/    public headers
-tools/      python conversion scripts (safetensors → GGUF), run via the uv venv
-docs/spec/  reverse-engineered per-component architecture spec
-tests/      parity / unit tests against reference tensors
-thirdparty/ vendored ggml
+src/            C++ implementation (models, ops, pipeline, drivers)
+src/test_*.cpp  parity / unit tests vs reference tensors (built as the trellis-test-* binaries)
+include/        public headers
+tools/          python conversion scripts (safetensors → GGUF) + reference-dump checks, via the uv venv
+docs/spec/      reverse-engineered per-component architecture spec
+thirdparty/     vendored ggml (gitignored), plus stb + xatlas
 ```

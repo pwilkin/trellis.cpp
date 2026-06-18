@@ -7,8 +7,11 @@ Legend: ☐ todo · ◐ in progress · ☑ done
 
 ## Status: working end-to-end, UV-textured PBR, 1024 cascade.
 `trellis-cli <image.png> <out.glb>` produces a UV-textured GLB (green goblin, silver helmet,
-spiked mace) via the **1024 cascade by default** (~150s f16 on the 5060 Ti). `TRELLIS_512=1`
-selects the faster res-512 path (~90s). BiRefNet background removal is the last remaining piece.
+spiked mace) via the **1024 cascade by default**; `TRELLIS_512=1` selects the lighter res-512
+path. The cascade is enabled by **FlashAttention with padded K/V** (`src/dit.cpp::sdpa`): it fits
+the 16 GB card (the manual softmax wanted a single ~18 GB score-matrix alloc at the
+sparse-structure stage) and the HR flow no longer NaNs (ggml's tiled CUDA FA poisoned the unpadded
+last key-tile at the HR token count, ≈53k). BiRefNet bg-removal is done (M2); only polish remains (M6).
 
 ## M0 — Foundations
 - ☑ Reverse-engineer architecture → `docs/spec/` (23 docs + IMPL_NOTES)
@@ -20,7 +23,9 @@ selects the faster res-512 path (~90s). BiRefNet background removal is the last 
 
 ## M1 — Shared GGML primitives
 - ☑ DiT blocks: timestep embed, AdaLN (share_mod) modulation, GELU-tanh MLP
-- ☑ Attention: QKV, multi-head SDPA, QK-RMSNorm, 3D interleaved-pair RoPE (dense + voxel-coord)
+- ☑ Attention: QKV, QK-RMSNorm, 3D interleaved-pair RoPE (dense + voxel-coord); SDPA via
+      **FlashAttention** (`ggml_flash_attn_ext`, BF16 K/V zero-padded to a 256-tile multiple) —
+      O(N) memory and NaN-free at the cascade's HR token count; `TRELLIS_NOFA=1` forces manual softmax
 - ☑ Cross-attention to image-condition tokens (affine norm2)
 - ☑ FlowEuler guidance-interval sampler (rescale_t warp, CFG interval, guidance_rescale)
 - ☑ SparseTensor (coords[N,4], feats[N,C]) + serialize order
@@ -50,7 +55,8 @@ selects the faster res-512 path (~90s). BiRefNet background removal is the last 
 - ☑ Sparse U-Net tex decoder → 6-ch PBR per voxel (replays shape decoder's subdiv masks)
 - ☑ Bake PBR onto mesh: decimate (vertex cluster) → xatlas UV → atlas raster + seam dilation →
       textured GLB (PBR baseColor + metallicRoughness, embedded PNG)
-- ☑ 512→1024 cascade (LR flow_512 → upsample → quantize res64 → HR flow_1024 → decode res1024)
+- ☑ 512→1024 cascade (LR flow_512 → upsample → quantize res64 → HR flow_1024 → decode res1024);
+      needed the FlashAttention + padded-K/V fix (M1) to fit VRAM and keep the HR flow finite
 
 ## M6 — Productionize
 - ☑ `trellis-cli <image.png> <out.glb> [gpu] [models_dir] [seed]` driver (per-stage model load/free)
