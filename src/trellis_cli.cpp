@@ -133,7 +133,19 @@ int main(int argc, char** argv) {
     const float* neg_dec  = neg.data();
     int Lc_dec = Lc;
     if (cascade) {
-        printf("[4/7] shape SLAT flow (LR 512 -> upsample -> HR 1024 cascade)\n");
+        // Cascade target resolution: 1024 (default, '1024_cascade') or e.g. 1536 ('1536_cascade').
+        // Both reuse the SAME shape_flow_1024 / tex_flow_1024 / cond_1024 — only the HR quantization
+        // grid (res//16) and the final decode resolution change. The reference floors the backoff at
+        // 1024 and caps the HR token count at max_num_tokens (49152) to stay within VRAM; the backoff
+        // steps the grid down by -128 while the unique res//16 token count would exceed it.
+        // Verified end-to-end: a clean reconstruction reaches grid 96 (res1536, ~15k tokens) and
+        // decodes a coherent ~5.4M-vert mesh — the c26fc76 FA holds at the cascade's token counts.
+        // (Caveat: a *bad TRELLIS seed* can yield a degenerate ~4x-bloated SLAT — ~44k tokens, garbage
+        //  geometry, and it can NaN the HR FA at grid 80. That's a reconstruction-quality problem, not
+        //  an FA limit: re-roll the seed rather than lowering this cap.)
+        const int hr_target = getenv("TRELLIS_HRRES")  ? atoi(getenv("TRELLIS_HRRES"))  : 1024;
+        const int max_tok   = getenv("TRELLIS_MAXTOK") ? atoi(getenv("TRELLIS_MAXTOK")) : 49152;
+        printf("[4/7] shape SLAT flow (LR 512 -> upsample -> HR %d cascade, max_tok=%d)\n", hr_target, max_tok);
         // (1) LR shape flow @res32 with cond_512
         vector<float> lr_norm = shape_flow(M + "/shape_flow_512.gguf", coords, cond.data(), neg.data(), Lc);
         vector<float> lr_dn(lr_norm.size());
@@ -144,14 +156,29 @@ int main(int argc, char** argv) {
         vector<std::array<int,3>> hr_coords;
         { trellis::Model m = trellis::Model::load(M + "/shape_dec.gguf", gpu);
           hr_coords = trellis::shape_upsample(m, lr_dn, coords); m.free(); }
-        // (3) quantize res512 -> res64 (= hr_res//16), unique (sorted)
-        std::set<std::array<int,3>> q;
-        for (auto& c : hr_coords) q.insert({ (int)((c[0]+0.5f)/512.f*64.f), (int)((c[1]+0.5f)/512.f*64.f), (int)((c[2]+0.5f)/512.f*64.f) });
-        shc.assign(q.begin(), q.end());
-        printf("      upsampled coords @res512=%d -> quantized @res64=%d\n", (int)hr_coords.size(), (int)shc.size());
-        // (4) HR shape flow @res64 with cond_1024
+        // (3) quantize res512 -> res(hr_res//16) with the reference's adaptive token-budget backoff
+        //     (sample_shape_slat_cascade): start at hr_target, step -128 toward the 1024 floor while
+        //     the unique token count would exceed max_num_tokens. grid = hr_res//16 is integral since
+        //     128/16 = 8 (1536->96, 1408->88, ..., 1024->64).
+        int hr_res = hr_target;
+        for (;;) {
+            const int gi = hr_res / 16;          // integral grid (ref's hr_resolution//16)
+            const float g = (float)gi;
+            std::set<std::array<int,3>> q;
+            for (auto& c : hr_coords) q.insert({ (int)((c[0]+0.5f)/512.f*g), (int)((c[1]+0.5f)/512.f*g), (int)((c[2]+0.5f)/512.f*g) });
+            if ((int)q.size() < max_tok || hr_res <= 1024) {
+                shc.assign(q.begin(), q.end());
+                printf("      upsampled coords @res512=%d -> quantized @res%d (grid %d) = %d tokens\n",
+                       (int)hr_coords.size(), hr_res, gi, (int)shc.size());
+                break;
+            }
+            printf("      res%d (grid %d) -> %d tokens >= %d, backing off -128\n",
+                   hr_res, gi, (int)q.size(), max_tok);
+            hr_res -= 128;
+        }
+        // (4) HR shape flow @res(hr_res//16) with cond_1024
         slat_norm = shape_flow(M + "/shape_flow_1024.gguf", shc, cond1024.data(), neg1024.data(), Lc1024);
-        RES = 1024; cond_dec = cond1024.data(); neg_dec = neg1024.data(); Lc_dec = Lc1024;
+        RES = hr_res; cond_dec = cond1024.data(); neg_dec = neg1024.data(); Lc_dec = Lc1024;
     } else {
         printf("[4/7] shape SLAT flow (512)\n");
         shc = coords;
@@ -161,7 +188,7 @@ int main(int argc, char** argv) {
     slat_dn.resize(slat_norm.size());
     for (int n = 0; n < N; ++n) for (int c = 0; c < 32; ++c)
         slat_dn[(size_t)c + 32*n] = slat_norm[(size_t)c + 32*n]*SHAPE_STD[c] + SHAPE_MEAN[c];
-    slat_stats(cascade ? "HR slat (res64, COLLAPSES in decode)" : "slat (res32)", slat_dn);
+    slat_stats(cascade ? "HR slat" : "slat (res32)", slat_dn);
     if (cascade && getenv("TRELLIS_DUMP_SLAT")) {   // dump HR slat for the reference-decoder diff
         FILE* f = fopen("/tmp/hr_slat.bin", "wb");
         if (f) {
