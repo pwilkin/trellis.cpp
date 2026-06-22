@@ -46,8 +46,22 @@ static T* apply_rope(ggml_context* c, T* x, T* cos, T* sin) {
     return ggml_reshape_3d(c, out, hd, nh, L);
 }
 
-// SDPA over heads. q:[hd,nh,Lq]  k,v:[hd,nh,Lk] -> [d_model, Lq]
-static T* sdpa(ggml_context* c, T* q, T* k, T* v, int d_model) {
+// An FA padding mask [Lk_pad, Lq] (F16): 0 for real keys (< Lk_real), a large negative for the
+// zero-padded tail. WITHOUT it, ggml's CUDA FlashAttention folds the (zero) padded keys into the
+// softmax; on the >=1024-token HR flow that path NaNs a subset of queries (props, <1024 tokens, dodge
+// it). WITH it the kernel masks/skips the padded KV tiles -> correct softmax, no NaN. Built once per
+// flow (same N every block) and threaded into every attention; -30000 (not -inf) so 0*mask can't NaN.
+static T* build_pad_mask(ggml_context* c, int64_t Lk_real, int64_t Lq) {
+    const int64_t KQ = 256;
+    const int64_t Lk_pad = ((Lk_real + KQ - 1) / KQ) * KQ;
+    T* sh = ggml_arange(c, 0.5f - (float)Lk_real, (float)Lk_pad - (float)Lk_real + 0.5f, 1.0f); // [Lk_pad]
+    T* col = ggml_scale(c, ggml_step(c, sh), -30000.0f);            // 0 (keep) | -30000 (mask) per key
+    T* colh = ggml_cast(c, ggml_reshape_2d(c, col, Lk_pad, 1), GGML_TYPE_F16);
+    return ggml_repeat(c, colh, ggml_new_tensor_2d(c, GGML_TYPE_F16, Lk_pad, Lq)); // [Lk_pad,Lq] F16, contig
+}
+
+// SDPA over heads. q:[hd,nh,Lq]  k,v:[hd,nh,Lk] -> [d_model, Lq].  `mask`: optional [Lk_pad,Lq] F16.
+static T* sdpa(ggml_context* c, T* q, T* k, T* v, int d_model, T* mask = nullptr) {
     const float scale = 1.0f / std::sqrt((float)q->ne[0]);
     // FlashAttention: a fused, tiled SDPA that never materialises the [Lk,Lq,nh] score
     // matrix — O(N) memory instead of O(N^2). That score buffer is exactly what OOMs the
@@ -76,7 +90,7 @@ static T* sdpa(ggml_context* c, T* q, T* k, T* v, int d_model) {
         if (qf->type != GGML_TYPE_F32) qf = ggml_cast(c, qf, GGML_TYPE_F32);
         T* kf = prep_kv(k);
         T* vf = prep_kv(v);
-        T* out = ggml_flash_attn_ext(c, qf, kf, vf, nullptr, scale, 0.0f, 0.0f);  // [hd, nh, Lq]
+        T* out = ggml_flash_attn_ext(c, qf, kf, vf, mask, scale, 0.0f, 0.0f);  // [hd, nh, Lq]
         ggml_flash_attn_ext_set_prec(out, GGML_PREC_F32);
         return ggml_reshape_2d(c, out, d_model, out->ne[2]);   // [d_model, Lq]
     }
@@ -96,7 +110,7 @@ static T* gamma32(ggml_context* c, const Model& m, const std::string& key) {
 }
 
 static T* self_attn(ggml_context* c, const Model& m, const std::string& pre, T* h,
-                    T* cos, T* sin, const DiTParams& p) {
+                    T* cos, T* sin, const DiTParams& p, T* mask = nullptr) {
     const int hd = p.head_dim, nh = p.n_heads;
     const int64_t L = h->ne[1];
     T* qkv = lin(c, m, pre + ".to_qkv", h);                     // [3*d_model, L]
@@ -110,11 +124,11 @@ static T* self_attn(ggml_context* c, const Model& m, const std::string& pre, T* 
     k = rms_gamma(c, k, gamma32(c, m, pre + ".k_rms_norm.gamma"), p.rms_eps);
     q = apply_rope(c, q, cos, sin);
     k = apply_rope(c, k, cos, sin);
-    return lin(c, m, pre + ".to_out", sdpa(c, q, k, v, p.d_model));
+    return lin(c, m, pre + ".to_out", sdpa(c, q, k, v, p.d_model, mask));
 }
 
 static T* cross_attn(ggml_context* c, const Model& m, const std::string& pre, T* h, T* cond,
-                     const DiTParams& p) {
+                     const DiTParams& p, T* mask = nullptr) {
     const int hd = p.head_dim, nh = p.n_heads;
     const int64_t L = h->ne[1], Lc = cond->ne[1];
     T* q = lin(c, m, pre + ".to_q", h);
@@ -128,7 +142,7 @@ static T* cross_attn(ggml_context* c, const Model& m, const std::string& pre, T*
     T* k = pick(0); T* v = pick(1);
     q = rms_gamma(c, q, gamma32(c, m, pre + ".q_rms_norm.gamma"), p.rms_eps);
     k = rms_gamma(c, k, gamma32(c, m, pre + ".k_rms_norm.gamma"), p.rms_eps);
-    return lin(c, m, pre + ".to_out", sdpa(c, q, k, v, p.d_model));
+    return lin(c, m, pre + ".to_out", sdpa(c, q, k, v, p.d_model, mask));
 }
 
 // x*(1+scale)+shift, scale/shift: [d_model] broadcast over L
@@ -137,7 +151,8 @@ static T* modulate(ggml_context* c, T* x, T* scale, T* shift) {
 }
 
 static T* block(ggml_context* c, const Model& m, int i, T* h, T* mod, T* cond,
-                T* cos, T* sin, const DiTParams& p, std::map<std::string, T*>* inter = nullptr) {
+                T* cos, T* sin, const DiTParams& p, std::map<std::string, T*>* inter = nullptr,
+                T* self_mask = nullptr, T* cross_mask = nullptr) {
     const std::string b = "blocks." + std::to_string(i);
     const int dm = p.d_model;
     auto dbg = [&](const char* n, T* t) { if (inter && i == 0) { (*inter)[n] = t; ggml_set_name(t, n); } return t; };
@@ -148,12 +163,12 @@ static T* block(ggml_context* c, const Model& m, int i, T* h, T* mod, T* cond,
 
     T* hh = layernorm(c, h, p.ln_eps);
     hh = modulate(c, hh, scale_msa, shift_msa);
-    hh = self_attn(c, m, b + ".self_attn", hh, cos, sin, p);
+    hh = self_attn(c, m, b + ".self_attn", hh, cos, sin, p, self_mask);
     dbg("blk0_msa", hh);
     h = ggml_add(c, h, ggml_mul(c, hh, gate_msa));
 
     hh = layernorm(c, h, p.ln_eps, m.get(b + ".norm2.weight"), m.get(b + ".norm2.bias"));
-    hh = cross_attn(c, m, b + ".cross_attn", hh, cond, p);
+    hh = cross_attn(c, m, b + ".cross_attn", hh, cond, p, cross_mask);
     dbg("blk0_cross", hh);
     h = ggml_add(c, h, hh);
 
@@ -182,8 +197,13 @@ ggml_tensor* build_dit_dense(ggml_context* c, const Model& m, const DiTParams& p
     T* mod = lin(c, m, "adaLN_modulation.1", ggml_silu(c, te));// [6*d_model]
     keep("t_emb_mod", mod);
 
+    // Padding masks for the two attentions, built ONCE (token counts are fixed across blocks) and
+    // shared by every block — they tell the CUDA FlashAttention to exclude the zero-padded key tiles
+    // (else the >=1024-token flow NaNs a subset of queries). self: Lk=L (the latent); cross: Lk=Lc.
+    T* self_mask  = build_pad_mask(c, h0->ne[1], h0->ne[1]);
+    T* cross_mask = build_pad_mask(c, cond->ne[1], h0->ne[1]);
     for (int i = 0; i < p.n_blocks; ++i) {
-        h = block(c, m, i, h, mod, cond, cos, sin, p, inter);
+        h = block(c, m, i, h, mod, cond, cos, sin, p, inter, self_mask, cross_mask);
         if (i == 0) keep("after_block0", h);
         if (i == 1) keep("after_block1", h);
         if (i == p.n_blocks - 1) keep("after_block29", h);

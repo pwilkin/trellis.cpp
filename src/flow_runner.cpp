@@ -56,9 +56,14 @@ std::vector<float> DitRunner::forward(const std::vector<float>& xt, float t_scal
     ggml_backend_tensor_set(gsin_, rsin_.data(), 0, rsin_.size() * 4);
     if (ggml_backend_graph_compute(m_.backend, g_) != GGML_STATUS_SUCCESS)
         throw std::runtime_error("DitRunner: compute failed");
-    if (dbg_nan_ && !dbg_done_) {
+    std::vector<float> outv = tensor_to_f32(gout_);
+    size_t out_bad = 0; for (float x : outv) if (!std::isfinite(x)) out_bad++;
+    // Dump the per-layer breakdown for the FIRST forward whose OUTPUT goes NaN (the failing low-t
+    // step), not just the very first forward (which is clean) — that's where to look for the cause.
+    if (dbg_nan_ && !dbg_done_ && out_bad > 0) {
         dbg_done_ = true;
-        // execution order: input -> blocks -> prefinal -> output
+        fprintf(stderr, "      [dit-nan] *** first NaN forward: t_scaled=%.2f  out_nan=%zu/%zu ***\n",
+                t_scaled, out_bad, outv.size());
         const char* order[] = { "after_input_layer", "after_block0", "after_block1",
                                 "blk0_msa", "blk0_cross", "blk0_mlp",
                                 "after_block29", "prefinal", "output" };
@@ -72,7 +77,7 @@ std::vector<float> DitRunner::forward(const std::vector<float>& xt, float t_scal
                     nm, bad, v.size(), amax);
         }
     }
-    return tensor_to_f32(gout_);
+    return outv;
 }
 
 // 3D interleaved-pair RoPE cos/sin tables: data[token*half + pair].
@@ -121,6 +126,11 @@ std::vector<float> sample_flow(const FlowFwd& fwd, std::vector<float> sample,
         ts[i] = sp.rescale_t * t / (1.0f + (sp.rescale_t - 1.0f) * t);
     }
     std::vector<float> pos, neg, pred(Nst);
+    static const bool dbg_step = std::getenv("TRELLIS_DBG_STEP") != nullptr;
+    static const bool no_fix   = std::getenv("TRELLIS_NOFIX") != nullptr;  // robustness guards ON by default
+    auto fstats = [](const std::vector<float>& v, size_t& bad, double& mx) {
+        bad = 0; mx = 0; for (float x : v) { if (!std::isfinite(x)) bad++; else if (std::fabs(x) > mx) mx = std::fabs(x); }
+    };
     for (int i = 0; i < sp.steps; ++i) {
         const float t = ts[i], tprev = ts[i + 1];
         const float gs = (sp.gi0 <= t && t <= sp.gi1) ? sp.guidance_strength : 1.0f;
@@ -142,11 +152,22 @@ std::vector<float> sample_flow(const FlowFwd& fwd, std::vector<float> sample,
                 double vp = 0, vc = 0;
                 for (size_t k = 0; k < Nst; ++k) { vp += (x0p[k]-mp)*(x0p[k]-mp); vc += (x0c[k]-mc)*(x0c[k]-mc); }
                 float ratio = vc > 0 ? (float)(std::sqrt(vp/(Nst-1)) / std::sqrt(vc/(Nst-1))) : 1.0f;
+                // OOD inputs (e.g. a thin figure at HR) can make vc tiny -> ratio explodes -> the
+                // rescaled velocity blows the latent past representable range over the 12 steps ->
+                // all-NaN SLAT. Clamp ratio to a sane band: it sits at ~1.0 for in-distribution
+                // props (a no-op there), and only bites on the pathological tail. (TRELLIS_NOFIX=1
+                // restores the raw behaviour for A/B.)
+                if (!no_fix) { if (!std::isfinite(ratio)) ratio = 1.0f; ratio = fminf(fmaxf(ratio, 0.2f), 5.0f); }
                 float gr = sp.guidance_rescale;
                 for (size_t k = 0; k < Nst; ++k) { float x0r = x0c[k]*ratio; float x0 = gr*x0r + (1-gr)*x0c[k]; pred[k] = (a*sample[k] - x0) / b; }
             }
         }
+        // Safety net: never integrate a non-finite velocity (one poisoned tap would spread to the
+        // whole latent on the next attention). A no-op when everything is finite.
+        if (!no_fix) for (size_t k = 0; k < Nst; ++k) if (!std::isfinite(pred[k])) pred[k] = 0.0f;
         for (size_t k = 0; k < Nst; ++k) sample[k] -= (t - tprev) * pred[k];
+        if (dbg_step) { size_t pb, sb; double pm, sm2; fstats(pred, pb, pm); fstats(sample, sb, sm2);
+            fprintf(stderr, "      [flow-step %2d] t=%.3f gs=%.1f  pred[nan=%zu max=%.3g]  sample[nan=%zu max=%.3g]\n", i, t, gs, pb, pm, sb, sm2); }
         if (trace) trace->push_back(sample);
     }
     return sample;
