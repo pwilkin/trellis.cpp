@@ -70,6 +70,10 @@ All three flow stages use a `FlowEulerGuidanceIntervalSampler` (rectified-flow E
 
 ## Models
 
+**Pre-built GGUFs:** [`ilintar/trellis2-gguf`](https://huggingface.co/ilintar/trellis2-gguf) —
+download the full set and point `trellis-cli` / `trellis-server` at that folder. Or convert your
+own from the source checkpoints below.
+
 Downloaded to `/media/ilintar/D_SSD/models/trellis2/` (the repo never stores weights):
 
 | role | source | notes |
