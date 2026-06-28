@@ -10,22 +10,25 @@
 #endif
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
 namespace trellis {
 
 static ggml_backend* make_backend(int gpu) {
+    // gpu < 0 is an explicit request for CPU.
+    if (gpu < 0) return ggml_backend_cpu_init();
 #ifdef TRELLIS_USE_CUDA
-    if (gpu >= 0) {
+    {
         ggml_backend* b = ggml_backend_cuda_init(gpu);
         if (b) return b;
-        fprintf(stderr, "[trellis] CUDA init failed on device %d, falling back\n", gpu);
+        fprintf(stderr, "[trellis] CUDA init failed on device %d\n", gpu);
     }
 #endif
     // Generic GPU path (e.g. Vulkan when built without CUDA): pick the GPU
     // device with the most total memory — the cascade is VRAM-hungry.
-    if (gpu >= 0) {
+    {
         ggml_backend_dev_t best = nullptr; size_t best_mem = 0;
         for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
             ggml_backend_dev_t d = ggml_backend_dev_get(i);
@@ -41,6 +44,15 @@ static ggml_backend* make_backend(int gpu) {
             }
         }
     }
+    // A GPU was requested but none is usable. By default fall back to CPU
+    // (preserves the original behavior). Opt in to strict GPU-only with
+    // TRELLIS_REQUIRE_GPU=1 — then we throw rather than silently running the
+    // VRAM-hungry cascade on the host (which balloons RAM and can OOM the box).
+    if (std::getenv("TRELLIS_REQUIRE_GPU")) {
+        throw std::runtime_error(
+            "[trellis] no usable GPU backend found and TRELLIS_REQUIRE_GPU is set; refusing CPU fallback.");
+    }
+    fprintf(stderr, "[trellis] no GPU backend available; falling back to CPU\n");
     return ggml_backend_cpu_init();
 }
 
