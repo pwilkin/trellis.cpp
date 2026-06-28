@@ -20,9 +20,27 @@ static ggml_backend* make_backend(int gpu) {
     if (gpu >= 0) {
         ggml_backend* b = ggml_backend_cuda_init(gpu);
         if (b) return b;
-        fprintf(stderr, "[trellis] CUDA init failed on device %d, falling back to CPU\n", gpu);
+        fprintf(stderr, "[trellis] CUDA init failed on device %d, falling back\n", gpu);
     }
 #endif
+    // Generic GPU path (e.g. Vulkan when built without CUDA): pick the GPU
+    // device with the most total memory — the cascade is VRAM-hungry.
+    if (gpu >= 0) {
+        ggml_backend_dev_t best = nullptr; size_t best_mem = 0;
+        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+            ggml_backend_dev_t d = ggml_backend_dev_get(i);
+            if (ggml_backend_dev_type(d) != GGML_BACKEND_DEVICE_TYPE_GPU) continue;
+            ggml_backend_dev_props pr; ggml_backend_dev_get_props(d, &pr);
+            if (pr.memory_total > best_mem) { best_mem = pr.memory_total; best = d; }
+        }
+        if (best) {
+            ggml_backend* b = ggml_backend_dev_init(best, nullptr);
+            if (b) {
+                fprintf(stderr, "[trellis] using %s (%zu MB)\n", ggml_backend_name(b), best_mem / (1024 * 1024));
+                return b;
+            }
+        }
+    }
     return ggml_backend_cpu_init();
 }
 

@@ -43,7 +43,9 @@ ggml_tensor* sparse_submconv(ggml_context* c, const Model& m, const std::string&
     T* fz = ggml_concat(c, feats, ggml_cont(c, zero), 1);          // [Ci, N+1]
     T* acc = nullptr;
     for (int t = 0; t < 27; ++t) {
-        T* idx = ggml_view_1d(c, nbr, N, (size_t)t * N * ggml_element_size(nbr));   // [N] i32
+        // cont() so idx is contiguous at buffer offset 0: the Vulkan get_rows
+        // kernel asserts a zero index offset (CUDA tolerates the view offset).
+        T* idx = ggml_cont(c, ggml_view_1d(c, nbr, N, (size_t)t * N * ggml_element_size(nbr)));   // [N] i32
         T* g = ggml_get_rows(c, fz, idx);                          // [Ci, N]
         T* Wt = ggml_cont(c, ggml_view_2d(c, W, Ci, Co, W->nb[2], (size_t)t * W->nb[1])); // [Ci,Co]
         T* o = ggml_mul_mat(c, Wt, g);                             // [Co, N]

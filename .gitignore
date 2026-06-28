@@ -1,5 +1,7 @@
 # build artifacts
 /build/
+/build-vk/
+/build-*/
 *.o
 *.a
 *.so
