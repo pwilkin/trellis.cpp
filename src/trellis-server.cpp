@@ -63,6 +63,8 @@ int main(int argc, char** argv) {
         const auto& image = req.get_file_value("image");
         uint32_t seed = 42;
         if (req.has_file("seed")) seed = (uint32_t) atoi(req.get_file_value("seed").content.c_str());
+        // Cascade resolution: "512" (default, light), "1024" (sharp), "1536" (big).
+        std::string resolution = req.has_file("resolution") ? req.get_file_value("resolution").content : "512";
 
         const std::string stem = std::string(std::tmpnam(nullptr));
         const std::string in_png = stem + ".png";
@@ -71,12 +73,17 @@ int main(int argc, char** argv) {
         std::string glb;
         {
             std::lock_guard<std::mutex> lk(gen_mu);
+            // Select the cascade per request via the same env knobs the pipeline reads.
+            if (resolution == "1536") { unsetenv("TRELLIS_512"); setenv("TRELLIS_HRRES", "1536", 1); }
+            else if (resolution == "1024") { unsetenv("TRELLIS_512"); unsetenv("TRELLIS_HRRES"); }
+            else { setenv("TRELLIS_512", "1", 1); unsetenv("TRELLIS_HRRES"); }
             if (!write_file_bytes(in_png, image.content)) {
                 res.status = 500;
                 res.set_content("{\"error\":\"failed to stage input image\"}", "application/json");
                 return;
             }
-            fprintf(stderr, "[trellis-server] generate: %zu-byte image, seed %u\n", image.content.size(), seed);
+            fprintf(stderr, "[trellis-server] generate: %zu-byte image, seed %u, res %s\n",
+                    image.content.size(), seed, resolution.c_str());
             int rc = trellis_run(in_png, out_glb, gpu, models, seed);
             if (rc == 0) glb = read_file_bytes(out_glb);
             std::remove(in_png.c_str());
