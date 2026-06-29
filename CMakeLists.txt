@@ -65,8 +65,33 @@ if(GGML_CUDA_LIB)
   target_link_libraries(trellis_core PUBLIC CUDA::cudart)
   message(STATUS "trellis.cpp: CUDA backend enabled (${GGML_CUDA_LIB})")
 else()
-  # No CUDA kernel in this build; stub the deformable conv (BiRefNet-only).
-  target_sources(trellis_core PRIVATE src/deform_conv_stub.cpp)
+  # No CUDA kernel in this build. Run BiRefNet's deformable conv on the GPU via a
+  # Vulkan compute shader when ggml is using Vulkan (CPU is minutes at its larger
+  # decoder scales); otherwise on the CPU, OpenMP-parallel over output channels.
+  target_sources(trellis_core PRIVATE src/deform_conv_cpu.cpp)
+  find_package(OpenMP QUIET)
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(trellis_core PUBLIC OpenMP::OpenMP_CXX)
+  endif()
+  if(GGML_VULKAN_LIB)
+    find_package(Vulkan REQUIRED COMPONENTS glslc)
+    set(DEFORM_SPV_H ${CMAKE_CURRENT_BINARY_DIR}/deform_conv_comp.h)
+    add_custom_command(
+      OUTPUT ${DEFORM_SPV_H}
+      COMMAND ${Vulkan_GLSLC_EXECUTABLE} -O -mfmt=c --target-env=vulkan1.2
+              -o ${DEFORM_SPV_H} ${CMAKE_CURRENT_SOURCE_DIR}/src/deform_conv.comp
+      DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/deform_conv.comp
+      COMMENT "glslc deform_conv.comp -> SPIR-V (C array)")
+    add_custom_target(trellis_deform_spv DEPENDS ${DEFORM_SPV_H})
+    target_sources(trellis_core PRIVATE src/deform_conv_vk.cpp)
+    add_dependencies(trellis_core trellis_deform_spv)
+    target_include_directories(trellis_core PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+    target_link_libraries(trellis_core PUBLIC Vulkan::Vulkan)
+    set_source_files_properties(src/deform_conv_cpu.cpp PROPERTIES
+      COMPILE_DEFINITIONS TRELLIS_DEFORM_VULKAN)
+    set_source_files_properties(src/deform_conv_vk.cpp PROPERTIES
+      COMPILE_DEFINITIONS "TRELLIS_DEFORM_SPV_HEADER=\"deform_conv_comp.h\"")
+  endif()
 endif()
 if(GGML_VULKAN_LIB)
   target_link_libraries(trellis_core PUBLIC ${GGML_VULKAN_LIB})

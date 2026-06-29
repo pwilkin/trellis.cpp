@@ -1,0 +1,66 @@
+#version 450
+// Modulated deformable conv2d (matches deform_conv.cu / torchvision deform_conv2d v2).
+// One invocation per output element; loops over (Cin, K, K), bilinear-samples x at the
+// per-location deformed positions with zero boundary. stride=1, dilation=1, pad=K/2.
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int Cin;
+    int H;
+    int W;
+    int Cout;
+    int K;
+    int pad;
+    int hasBias;
+} pc;
+
+layout(std430, binding = 0) readonly  buffer XBuf    { float x[]; };
+layout(std430, binding = 1) readonly  buffer OffBuf  { float offs[]; };
+layout(std430, binding = 2) readonly  buffer MaskBuf { float msk[]; };
+layout(std430, binding = 3) readonly  buffer WBuf    { float wgt[]; };
+layout(std430, binding = 4) readonly  buffer BBuf    { float bias[]; };
+layout(std430, binding = 5) writeonly buffer OBuf    { float outp[]; };
+
+float bilinear(uint base, int H, int W, float h, float w) {
+    if (h <= -1.0 || float(H) <= h || w <= -1.0 || float(W) <= w) return 0.0;
+    int h_low = int(floor(h)), w_low = int(floor(w));
+    int h_high = h_low + 1, w_high = w_low + 1;
+    float lh = h - float(h_low), lw = w - float(w_low), hh = 1.0 - lh, hw = 1.0 - lw;
+    float v1 = (h_low >= 0   && w_low >= 0)     ? x[base + uint(h_low  * W + w_low)]  : 0.0;
+    float v2 = (h_low >= 0   && w_high <= W - 1) ? x[base + uint(h_low  * W + w_high)] : 0.0;
+    float v3 = (h_high <= H-1 && w_low >= 0)     ? x[base + uint(h_high * W + w_low)]  : 0.0;
+    float v4 = (h_high <= H-1 && w_high <= W - 1) ? x[base + uint(h_high * W + w_high)] : 0.0;
+    return hh * hw * v1 + hh * lw * v2 + lh * hw * v3 + lh * lw * v4;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint HW = uint(pc.H) * uint(pc.W);
+    uint total = uint(pc.Cout) * HW;
+    if (idx >= total) return;
+
+    int oc = int(idx / HW);
+    uint rem = idx % HW;
+    int oy = int(rem) / pc.W;
+    int ox = int(rem) % pc.W;
+    int K2 = pc.K * pc.K;
+
+    float acc = (pc.hasBias != 0) ? bias[oc] : 0.0;
+    for (int ic = 0; ic < pc.Cin; ++ic) {
+        uint xbase = uint(ic) * HW;
+        uint wbase = (uint(oc) * uint(pc.Cin) + uint(ic)) * uint(K2);
+        for (int kh = 0; kh < pc.K; ++kh) {
+            for (int kw = 0; kw < pc.K; ++kw) {
+                int t = kh * pc.K + kw;
+                float oh = offs[uint(2 * t)     * HW + rem];
+                float ow = offs[uint(2 * t + 1) * HW + rem];
+                float m  = msk[uint(t) * HW + rem];
+                float ph = float(oy - pc.pad + kh) + oh;
+                float pw = float(ox - pc.pad + kw) + ow;
+                acc += wgt[wbase + uint(t)] * m * bilinear(xbase, pc.H, pc.W, ph, pw);
+            }
+        }
+    }
+    outp[idx] = acc;
+}
