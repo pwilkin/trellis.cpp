@@ -6,9 +6,6 @@
 *.a
 *.so
 
-# vendored deps (kept out of history; cloned by setup)
-/thirdparty/ggml/
-
 # models & weights live on D_SSD, never in the repo
 *.gguf
 *.safetensors

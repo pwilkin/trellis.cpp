@@ -9,25 +9,24 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# --- vendored, prebuilt ggml (built once in thirdparty/ggml/build) ---------
-set(GGML_DIR   ${CMAKE_SOURCE_DIR}/thirdparty/ggml)
-# Point at a prebuilt ggml tree; override -DGGML_BUILD=... for a Vulkan build
-# (e.g. thirdparty/ggml/build-vk) without disturbing the default CUDA build.
-set(GGML_BUILD ${GGML_DIR}/build CACHE PATH "prebuilt ggml build dir")
-if(NOT EXISTS ${GGML_BUILD}/src/libggml.so)
-  message(FATAL_ERROR "ggml not built. Run: cmake -B thirdparty/ggml/build -S thirdparty/ggml -DGGML_CUDA=ON && cmake --build thirdparty/ggml/build -j  (or -DGGML_VULKAN=ON into build-vk)")
-endif()
-
-find_library(GGML_LIB        ggml        PATHS ${GGML_BUILD}/src             NO_DEFAULT_PATH)
-find_library(GGML_BASE_LIB   ggml-base   PATHS ${GGML_BUILD}/src             NO_DEFAULT_PATH)
-find_library(GGML_CPU_LIB    ggml-cpu    PATHS ${GGML_BUILD}/src             NO_DEFAULT_PATH)
-find_library(GGML_CUDA_LIB   ggml-cuda   PATHS ${GGML_BUILD}/src/ggml-cuda   NO_DEFAULT_PATH)
-find_library(GGML_VULKAN_LIB ggml-vulkan PATHS ${GGML_BUILD}/src/ggml-vulkan ${GGML_BUILD}/src NO_DEFAULT_PATH)
-
-set(GGML_RPATH "${GGML_BUILD}/src;${GGML_BUILD}/src/ggml-cuda;${GGML_BUILD}/src/ggml-vulkan")
+# --- vendored ggml submodule, built in-tree --------------------------------
+# Backend is selected at configure time with the upstream flags
+# (-DGGML_CUDA=ON / -DGGML_VULKAN=ON); the matching ggml-<backend> target then
+# exists and we link it. DiT/sparse tensor names exceed the default 64 chars,
+# so raise GGML_MAX_NAME for both ggml and our own sources (the header guards
+# it with #ifndef, so a compile definition is enough — no submodule patch).
+set(GGML_DIR ${CMAKE_SOURCE_DIR}/thirdparty/ggml)
+add_compile_definitions(GGML_MAX_NAME=128)
+# Colocate ggml's shared libs with our executables so they're found via $ORIGIN
+# both in the build tree and once packaged.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+add_subdirectory(thirdparty/ggml)
+set(GGML_RPATH "$ORIGIN")
+set(CMAKE_INSTALL_RPATH "$ORIGIN")
 
 # --- CUDA language (for the custom deformable-conv kernel) ------------------
-if(GGML_CUDA_LIB)
+if(TARGET ggml-cuda)
   if(EXISTS /usr/local/cuda-13.3/bin/nvcc AND NOT CMAKE_CUDA_COMPILER)
     set(CMAKE_CUDA_COMPILER /usr/local/cuda-13.3/bin/nvcc)
   endif()
@@ -56,10 +55,10 @@ add_library(trellis_core STATIC
   thirdparty/xatlas/xatlas.cpp
 )
 target_include_directories(trellis_core PUBLIC include ${GGML_DIR}/include ${CMAKE_SOURCE_DIR}/thirdparty/stb ${CMAKE_SOURCE_DIR}/thirdparty/xatlas)
-target_link_libraries(trellis_core PUBLIC ${GGML_LIB} ${GGML_BASE_LIB} ${GGML_CPU_LIB})
-if(GGML_CUDA_LIB)
+target_link_libraries(trellis_core PUBLIC ggml ggml-base ggml-cpu)
+if(TARGET ggml-cuda)
   target_compile_definitions(trellis_core PUBLIC TRELLIS_USE_CUDA)
-  target_link_libraries(trellis_core PUBLIC ${GGML_CUDA_LIB})
+  target_link_libraries(trellis_core PUBLIC ggml-cuda)
   target_sources(trellis_core PRIVATE src/deform_conv.cu)
   set_target_properties(trellis_core PROPERTIES CUDA_ARCHITECTURES "86;120" CUDA_RUNTIME_LIBRARY Shared)
   target_link_libraries(trellis_core PUBLIC CUDA::cudart)
@@ -73,7 +72,7 @@ else()
   if(OpenMP_CXX_FOUND)
     target_link_libraries(trellis_core PUBLIC OpenMP::OpenMP_CXX)
   endif()
-  if(GGML_VULKAN_LIB)
+  if(TARGET ggml-vulkan)
     find_package(Vulkan REQUIRED COMPONENTS glslc)
     set(DEFORM_SPV_H ${CMAKE_CURRENT_BINARY_DIR}/deform_conv_comp.h)
     add_custom_command(
@@ -93,9 +92,9 @@ else()
       COMPILE_DEFINITIONS "TRELLIS_DEFORM_SPV_HEADER=\"deform_conv_comp.h\"")
   endif()
 endif()
-if(GGML_VULKAN_LIB)
-  target_link_libraries(trellis_core PUBLIC ${GGML_VULKAN_LIB})
-  message(STATUS "trellis.cpp: Vulkan backend enabled (${GGML_VULKAN_LIB})")
+if(TARGET ggml-vulkan)
+  target_link_libraries(trellis_core PUBLIC ggml-vulkan)
+  message(STATUS "trellis.cpp: Vulkan backend enabled")
 endif()
 
 # --- executables -----------------------------------------------------------
