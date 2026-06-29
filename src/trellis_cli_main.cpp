@@ -1,16 +1,19 @@
-// Thin CLI entry point: parse args, then run the shared trellis_run() pipeline.
+// Thin CLI entry point: parse args (CLI flags with TRELLIS_* env fallback), then
+// run the shared trellis_run() pipeline.
+#include "trellis_args.h"
 #include "trellis_run.h"
 #include <cstdio>
-#include <cstdlib>
-#include <string>
 
 int main(int argc, char** argv) {
-    if (argc < 3) {
-        fprintf(stderr, "usage: %s <image.png> <out.glb> [gpu] [models_dir] [seed]\n", argv[0]);
+    trellis::TrellisParams p;
+    if (!trellis::parse_args(argc, argv, p)) {
+        trellis::print_usage(argv[0], /*server=*/false);
+        return p.help ? 0 : 1;
+    }
+    if (p.image.empty()) {
+        fprintf(stderr, "[trellis] no input image (give <image.png> or --image)\n");
+        trellis::print_usage(argv[0], /*server=*/false);
         return 1;
     }
-    const int gpu = argc > 3 ? atoi(argv[3]) : 1;
-    const std::string M = argc > 4 ? argv[4] : "/media/ilintar/D_SSD/models/trellis2/gguf";
-    const uint32_t seed = argc > 5 ? (uint32_t)atoi(argv[5]) : 42;
-    return trellis_run(argv[1], argv[2], gpu, M, seed);
+    return trellis_run(p);
 }

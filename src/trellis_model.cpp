@@ -16,6 +16,8 @@
 
 namespace trellis {
 
+bool g_require_gpu = false;   // TRELLIS_REQUIRE_GPU / --require-gpu; set by trellis_run (env fallback below)
+
 static ggml_backend* make_backend(int gpu) {
     // gpu < 0 is an explicit request for CPU.
     if (gpu < 0) return ggml_backend_cpu_init();
@@ -48,9 +50,9 @@ static ggml_backend* make_backend(int gpu) {
     // (preserves the original behavior). Opt in to strict GPU-only with
     // TRELLIS_REQUIRE_GPU=1 — then we throw rather than silently running the
     // VRAM-hungry cascade on the host (which balloons RAM and can OOM the box).
-    if (std::getenv("TRELLIS_REQUIRE_GPU")) {
+    if (g_require_gpu || std::getenv("TRELLIS_REQUIRE_GPU")) {
         throw std::runtime_error(
-            "[trellis] no usable GPU backend found and TRELLIS_REQUIRE_GPU is set; refusing CPU fallback.");
+            "[trellis] no usable GPU backend found and --require-gpu/TRELLIS_REQUIRE_GPU is set; refusing CPU fallback.");
     }
     fprintf(stderr, "[trellis] no GPU backend available; falling back to CPU\n");
     return ggml_backend_cpu_init();

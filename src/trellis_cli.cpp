@@ -43,16 +43,22 @@ static const float SHAPE_STD[32]={5.972266f,4.706852f,5.445010f,5.209927f,5.3202
 static const float TEX_MEAN[32]={3.501659f,2.212398f,2.226094f,0.251093f,-0.026248f,-0.687364f,0.439898f,-0.928075f,0.029398f,-0.339596f,-0.869527f,1.038479f,-0.972385f,0.126042f,-1.129303f,0.455149f,-1.209521f,2.069067f,0.544735f,2.569128f,-0.323407f,2.293000f,-1.925608f,-1.217717f,1.213905f,0.971588f,-0.023631f,0.106750f,2.021786f,0.250524f,-0.662387f,-0.768862f};
 static const float TEX_STD[32]={2.665652f,2.743913f,2.765121f,2.595319f,3.037293f,2.291316f,2.144656f,2.911822f,2.969419f,2.501689f,2.154811f,3.163343f,2.621215f,2.381943f,3.186697f,3.021588f,2.295916f,3.234985f,3.233086f,2.260140f,2.874801f,2.810596f,3.292720f,2.674999f,2.680878f,2.372054f,2.451546f,2.353556f,2.995195f,2.379849f,2.786195f,2.775190f};
 
-namespace trellis { extern bool g_sparse_cast_f32; }
-int trellis_run(const std::string& img, const std::string& outglb, int gpu, const std::string& M, uint32_t seed) {
+int trellis_run(const trellis::TrellisParams& cfg) {
     setvbuf(stdout, nullptr, _IOLBF, 0);   // line-buffered so progress shows when piped
-    const bool F32 = getenv("TRELLIS_F32"); trellis::g_sparse_cast_f32 = F32;  // f16 default (rope bug was the real issue)
-    const bool cascade = !getenv("TRELLIS_512");   // 1024 cascade is the TRELLIS default; TRELLIS_512 forces the old 512 path
-    std::mt19937 rng(seed); std::normal_distribution<float> randn(0.f, 1.f);
+    // Publish the cross-module flags this run wants (modules read them with an env fallback).
+    const bool F32 = cfg.f32; trellis::g_sparse_cast_f32 = F32;  // f16 default (rope bug was the real issue)
+    trellis::g_no_fa = cfg.no_fa;
+    trellis::g_require_gpu = cfg.require_gpu;
+    const std::string& img = cfg.image;
+    const std::string& outglb = cfg.output;
+    const std::string& M = cfg.models;
+    const int gpu = cfg.gpu;
+    const bool cascade = cfg.cascade;   // 1024 cascade is the TRELLIS default; --res 512 forces the light path
+    std::mt19937 rng(cfg.seed); std::normal_distribution<float> randn(0.f, 1.f);
     auto noise = [&](size_t n){ vector<float> v(n); for (auto& x : v) x = randn(rng); return v; };
     double t0 = now();
 
-    const bool birefnet = getenv("TRELLIS_BIREFNET");
+    const bool birefnet = cfg.birefnet;
     vector<float> chw, chw1024;
     if (birefnet) {
         printf("[1/6] preprocess %s (BiRefNet bg removal, %s)\n", img.c_str(), cascade ? "1024 cascade" : "512");
@@ -92,7 +98,7 @@ int trellis_run(const std::string& img, const std::string& outglb, int gpu, cons
         trellis::DiTParams p; p.in_ch = 8; p.out_ch = 8; p.d_cond = 1024; p.cast_f32 = F32;
         trellis::DitRunner* run = trellis::make_dense_runner(m, p, 16, Lc);
         trellis::FlowFwd fwd = [&](const vector<float>& x, float ts, const float* c){ return run->forward(x, ts, c); };
-        trellis::SamplerParams sp; sp.steps=12; sp.guidance_strength=getenv("GSS")?atof(getenv("GSS")):7.5f; sp.guidance_rescale=0.7f; sp.gi0=0.6f; sp.gi1=1.0f; sp.rescale_t=5.0f;
+        trellis::SamplerParams sp; sp.steps=12; sp.guidance_strength=cfg.gss; sp.guidance_rescale=0.7f; sp.gi0=0.6f; sp.gi1=1.0f; sp.rescale_t=5.0f;
         vector<float> z = trellis::sample_flow(fwd, noise(8*4096), cond.data(), neg.data(), sp);  // [8,4096] ne0=8
         delete run; m.free();
         // transpose [8,L] -> torch [8,16,16,16] memory (c*4096 + sp)
@@ -102,11 +108,11 @@ int trellis_run(const std::string& img, const std::string& outglb, int gpu, cons
         vector<float> logits = trellis::ss_decode(d, zdec); d.free();
         coords = trellis::ss_coords(logits, 64, 32);
     }
-    if (getenv("TRELLIS_VOXPLY")) { FILE*f=fopen("out/myvox.ply","wb"); fprintf(f,"ply\nformat binary_little_endian 1.0\nelement vertex %zu\nproperty float x\nproperty float y\nproperty float z\nelement face 0\nproperty list uchar int vertex_indices\nend_header\n",coords.size()); for(auto&c:coords){float p[3]={(c[0]+0.5f)/32-0.5f,(c[1]+0.5f)/32-0.5f,(c[2]+0.5f)/32-0.5f}; fwrite(p,4,3,f);} fclose(f); }
+    if (cfg.voxply) { FILE*f=fopen("out/myvox.ply","wb"); fprintf(f,"ply\nformat binary_little_endian 1.0\nelement vertex %zu\nproperty float x\nproperty float y\nproperty float z\nelement face 0\nproperty list uchar int vertex_indices\nend_header\n",coords.size()); for(auto&c:coords){float p[3]={(c[0]+0.5f)/32-0.5f,(c[1]+0.5f)/32-0.5f,(c[2]+0.5f)/32-0.5f}; fwrite(p,4,3,f);} fclose(f); }
     printf("      active voxels @res32 = %d\n", (int)coords.size());
     if (coords.empty()) { fprintf(stderr, "no voxels produced\n"); return 1; }
 
-    const bool do_tex = !getenv("TRELLIS_NOTEX");
+    const bool do_tex = cfg.texture;
 
     // one shape SLAT flow run -> normalized [32,n] (sparse, CFG 7.5, gi[0.6,1], rescale_t 3)
     auto shape_flow = [&](const std::string& path, const vector<std::array<int,3>>& cds,
@@ -116,7 +122,7 @@ int trellis_run(const std::string& img, const std::string& outglb, int gpu, cons
         trellis::DiTParams p; p.in_ch = 32; p.out_ch = 32; p.d_cond = 1024; p.cast_f32 = F32;
         trellis::DitRunner* run = trellis::make_sparse_runner(m, p, cds, lc);
         trellis::FlowFwd fwd = [&](const vector<float>& x, float ts, const float* c){ return run->forward(x, ts, c); };
-        trellis::SamplerParams sp; sp.steps=12; sp.guidance_strength=getenv("GSH")?atof(getenv("GSH")):7.5f; sp.guidance_rescale=0.5f; sp.gi0=0.6f; sp.gi1=1.0f; sp.rescale_t=3.0f;
+        trellis::SamplerParams sp; sp.steps=12; sp.guidance_strength=cfg.gsh; sp.guidance_rescale=0.5f; sp.gi0=0.6f; sp.gi1=1.0f; sp.rescale_t=3.0f;
         vector<float> sn = trellis::sample_flow(fwd, noise((size_t)32*n), cnd, ncnd, sp);   // [32,n]
         delete run; m.free();
         return sn;
@@ -139,8 +145,8 @@ int trellis_run(const std::string& img, const std::string& outglb, int gpu, cons
         // (Caveat: a *bad TRELLIS seed* can yield a degenerate ~4x-bloated SLAT — ~44k tokens, garbage
         //  geometry, and it can NaN the HR FA at grid 80. That's a reconstruction-quality problem, not
         //  an FA limit: re-roll the seed rather than lowering this cap.)
-        const int hr_target = getenv("TRELLIS_HRRES")  ? atoi(getenv("TRELLIS_HRRES"))  : 1024;
-        const int max_tok   = getenv("TRELLIS_MAXTOK") ? atoi(getenv("TRELLIS_MAXTOK")) : 49152;
+        const int hr_target = cfg.hr_res;
+        const int max_tok   = cfg.max_tokens;
         printf("[4/7] shape SLAT flow (LR 512 -> upsample -> HR %d cascade, max_tok=%d)\n", hr_target, max_tok);
         // (1) LR shape flow @res32 with cond_512
         vector<float> lr_norm = shape_flow(M + "/shape_flow_512.gguf", coords, cond.data(), neg.data(), Lc);
@@ -185,7 +191,7 @@ int trellis_run(const std::string& img, const std::string& outglb, int gpu, cons
     for (int n = 0; n < N; ++n) for (int c = 0; c < 32; ++c)
         slat_dn[(size_t)c + 32*n] = slat_norm[(size_t)c + 32*n]*SHAPE_STD[c] + SHAPE_MEAN[c];
     slat_stats(cascade ? "HR slat" : "slat (res32)", slat_dn);
-    if (cascade && getenv("TRELLIS_DUMP_SLAT")) {   // dump HR slat for the reference-decoder diff
+    if (cascade && cfg.dump_slat) {   // dump HR slat for the reference-decoder diff
         FILE* f = fopen("/tmp/hr_slat.bin", "wb");
         if (f) {
             int n = N, res = RES; fwrite(&n, 4, 1, f); fwrite(&res, 4, 1, f);
@@ -249,11 +255,11 @@ int trellis_run(const std::string& img, const std::string& outglb, int gpu, cons
         // xatlas. xatlas chart-compute is ~superlinear in faces (grid 384 -> 382K faces hung >9min)
         // and only spreads across ~2 cores even though it's multithreaded, so it dominated the bake
         // (minutes); box projection is seconds. TRELLIS_XATLAS=1 restores xatlas for tighter packing.
-        const bool boxuv = !getenv("TRELLIS_XATLAS");
-        const int T = getenv("TRELLIS_TEX") ? atoi(getenv("TRELLIS_TEX")) : (cascade ? 1536 : 1024);
-        // Cluster-decimate to the tri budget first either way (props rely on TRELLIS_DECIM for this);
-        // TRELLIS_DECIM=0 keeps the full res-1024 mesh (pair with a larger TRELLIS_TEX for detail).
-        const int dg = getenv("TRELLIS_DECIM") ? atoi(getenv("TRELLIS_DECIM")) : (cascade ? 256 : 192);
+        const bool boxuv = !cfg.xatlas;
+        const int T = cfg.tex >= 0 ? cfg.tex : (cascade ? 1536 : 1024);
+        // Cluster-decimate to the tri budget first either way (props rely on --decim for this);
+        // --decim 0 keeps the full res-1024 mesh (pair with a larger --atlas for detail).
+        const int dg = cfg.decim >= 0 ? cfg.decim : (cascade ? 256 : 192);
         std::vector<float> dv, dp; std::vector<int32_t> df;
         if (dg > 0) trellis::decimate_cluster(mesh.verts, mesh.V(), mesh.faces, mesh.F(), pbr6, dg, dv, df, dp);
         else { dv = mesh.verts; df = mesh.faces; dp = pbr6; }

@@ -118,13 +118,13 @@ add_executable(trellis-test-shape-dec src/test_shape_dec.cpp)
 target_link_libraries(trellis-test-shape-dec PRIVATE trellis_core)
 set_target_properties(trellis-test-shape-dec PROPERTIES BUILD_RPATH "${GGML_RPATH}")
 
-add_executable(trellis-cli src/trellis_cli_main.cpp src/trellis_cli.cpp)
+add_executable(trellis-cli src/trellis_cli_main.cpp src/trellis_cli.cpp src/trellis_args.cpp)
 target_link_libraries(trellis-cli PRIVATE trellis_core)
 set_target_properties(trellis-cli PROPERTIES BUILD_RPATH "${GGML_RPATH}")
 
 # Resident HTTP server (keeps the process warm; wraps trellis_run).
 find_package(Threads REQUIRED)
-add_executable(trellis-server src/trellis-server.cpp src/trellis_cli.cpp)
+add_executable(trellis-server src/trellis-server.cpp src/trellis_cli.cpp src/trellis_args.cpp)
 target_include_directories(trellis-server PRIVATE ${CMAKE_SOURCE_DIR}/thirdparty/cpp-httplib)
 target_link_libraries(trellis-server PRIVATE trellis_core Threads::Threads)
 set_target_properties(trellis-server PROPERTIES BUILD_RPATH "${GGML_RPATH}")

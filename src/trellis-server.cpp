@@ -1,31 +1,25 @@
 // trellis-server — resident HTTP wrapper around the TRELLIS.2 image->3D pipeline.
 //
 //   GET  /health     -> "ok"
-//   POST /generate    multipart/form-data with an "image" file part
-//                      (optional text field "seed"); returns model/gltf-binary
+//   POST /generate    multipart/form-data with an "image" file part; optional text
+//                      fields "seed", "resolution" (512/1024/1536), "bg_removal"
+//                      (threshold|birefnet). Returns model/gltf-binary.
 //
-// The model directory is resolved once at startup; each request runs the full
-// pipeline via trellis_run() (per-stage load/free, like trellis-cli), serialized
-// by a mutex. Keeping the process resident avoids re-initializing the Vulkan
-// backend (shader load) on every request. The compute device is chosen by
-// make_backend (Vulkan when built without CUDA / when CUDA is hidden).
+// Launch-time defaults come from CLI flags / TRELLIS_* env (see trellis::parse_args);
+// each request copies those defaults and applies its own overrides. The model
+// directory is resolved once; each request runs the full pipeline via trellis_run()
+// (per-stage load/free, like trellis-cli), serialized by a mutex. Keeping the
+// process resident avoids re-initializing the Vulkan backend on every request.
+#include "trellis_args.h"
 #include "trellis_run.h"
 #include "httplib.h"
 
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <string>
-#include <vector>
 
 namespace {
-
-const char* opt(int argc, char** argv, const char* key, const char* def) {
-    for (int i = 1; i + 1 < argc; ++i) if (!strcmp(argv[i], key)) return argv[i + 1];
-    return def;
-}
 
 std::string read_file_bytes(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
@@ -42,10 +36,11 @@ bool write_file_bytes(const std::string& path, const std::string& data) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    const std::string models = opt(argc, argv, "--models", "/media/ilintar/D_SSD/models/trellis2/gguf");
-    const std::string host = opt(argc, argv, "--host", "127.0.0.1");
-    const int port = atoi(opt(argc, argv, "--port", "8080"));
-    const int gpu = atoi(opt(argc, argv, "--gpu", "0"));  // >=0 selects a GPU device (Vulkan picks the roomiest)
+    trellis::TrellisParams base;
+    if (!trellis::parse_args(argc, argv, base)) {
+        trellis::print_usage(argv[0], /*server=*/true);
+        return base.help ? 0 : 1;
+    }
 
     std::mutex gen_mu;
     httplib::Server svr;
@@ -61,34 +56,33 @@ int main(int argc, char** argv) {
             return;
         }
         const auto& image = req.get_file_value("image");
-        uint32_t seed = 42;
-        if (req.has_file("seed")) seed = (uint32_t) atoi(req.get_file_value("seed").content.c_str());
-        // Cascade resolution: "512" (default, light), "1024" (sharp), "1536" (big).
-        std::string resolution = req.has_file("resolution") ? req.get_file_value("resolution").content : "512";
+
+        // Per-request params start from the launch defaults, then apply overrides.
+        trellis::TrellisParams p = base;
+        if (req.has_file("seed")) p.seed = (uint32_t) atoi(req.get_file_value("seed").content.c_str());
+        if (req.has_file("resolution")) p.set_res(atoi(req.get_file_value("resolution").content.c_str()));
+        if (req.has_file("bg_removal")) p.birefnet = (req.get_file_value("bg_removal").content == "birefnet");
 
         const std::string stem = std::string(std::tmpnam(nullptr));
-        const std::string in_png = stem + ".png";
-        const std::string out_glb = stem + ".glb";
+        p.image  = stem + ".png";
+        p.output = stem + ".glb";
 
         std::string glb;
         {
             std::lock_guard<std::mutex> lk(gen_mu);
-            // Select the cascade per request via the same env knobs the pipeline reads.
-            if (resolution == "1536") { unsetenv("TRELLIS_512"); setenv("TRELLIS_HRRES", "1536", 1); }
-            else if (resolution == "1024") { unsetenv("TRELLIS_512"); unsetenv("TRELLIS_HRRES"); }
-            else { setenv("TRELLIS_512", "1", 1); unsetenv("TRELLIS_HRRES"); }
-            if (!write_file_bytes(in_png, image.content)) {
+            if (!write_file_bytes(p.image, image.content)) {
                 res.status = 500;
                 res.set_content("{\"error\":\"failed to stage input image\"}", "application/json");
                 return;
             }
-            fprintf(stderr, "[trellis-server] generate: %zu-byte image, seed %u, res %s\n",
-                    image.content.size(), seed, resolution.c_str());
-            int rc = trellis_run(in_png, out_glb, gpu, models, seed);
-            if (rc == 0) glb = read_file_bytes(out_glb);
-            std::remove(in_png.c_str());
-            std::remove(out_glb.c_str());
-            // trellis_run also writes a sibling .ply (debug); clean it up too.
+            fprintf(stderr, "[trellis-server] generate: %zu-byte image, seed %u, res %s, bg %s\n",
+                    image.content.size(), p.seed, p.cascade ? std::to_string(p.hr_res).c_str() : "512",
+                    p.birefnet ? "birefnet" : "threshold");
+            int rc = trellis_run(p);
+            if (rc == 0) glb = read_file_bytes(p.output);
+            std::remove(p.image.c_str());
+            std::remove(p.output.c_str());
+            // trellis_run also writes sibling debug artifacts; clean them up too.
             std::remove((stem + ".ply").c_str());
             std::remove((stem + "_base.png").c_str());
         }
@@ -102,9 +96,9 @@ int main(int argc, char** argv) {
     });
 
     fprintf(stderr, "[trellis-server] models=%s gpu=%d listening on http://%s:%d\n",
-            models.c_str(), gpu, host.c_str(), port);
-    if (!svr.listen(host, port)) {
-        fprintf(stderr, "[trellis-server] failed to bind %s:%d\n", host.c_str(), port);
+            base.models.c_str(), base.gpu, base.host.c_str(), base.port);
+    if (!svr.listen(base.host, base.port)) {
+        fprintf(stderr, "[trellis-server] failed to bind %s:%d\n", base.host.c_str(), base.port);
         return 1;
     }
     return 0;
