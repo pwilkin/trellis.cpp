@@ -1,0 +1,141 @@
+name: Build & Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to attach binaries to (e.g. v0.1.0)"
+        required: true
+        default: "v0.1.0"
+
+permissions:
+  contents: write
+
+# Asset names must match Lemonade's media_release_asset():
+#   trellis-<backend>-<os>-x64.<tar.gz|zip>
+jobs:
+  build:
+    name: ${{ matrix.os }} · ${{ matrix.backend }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental == true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux,   backend: vulkan, runner: ubuntu-22.04 }
+          - { os: linux,   backend: cuda,   runner: ubuntu-22.04 }
+          - { os: linux,   backend: rocm,   runner: ubuntu-22.04,  experimental: true }
+          - { os: windows, backend: vulkan, runner: windows-2022 }
+          - { os: windows, backend: cuda,   runner: windows-2022, experimental: true }
+          - { os: windows, backend: rocm,   runner: windows-2022, experimental: true }
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: MSVC dev shell (Windows)
+        if: matrix.os == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ matrix.os }}-${{ matrix.backend }}
+
+      # Linux: the minimal SDK is enough (runner provides spirv-headers).
+      - name: Vulkan SDK (Linux)
+        if: matrix.backend == 'vulkan' && matrix.os == 'linux'
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
+      # Windows: ggml-vulkan + the deform_conv shader need the full SDK
+      # (SPIRV-Headers/-Tools CMake configs), which the minimal install lacks.
+      - name: Vulkan SDK (Windows)
+        if: matrix.backend == 'vulkan' && matrix.os == 'windows'
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: 1.4.309.0
+          install_runtime: true
+          cache: true
+
+      - name: CUDA toolkit
+        if: matrix.backend == 'cuda'
+        uses: Jimver/cuda-toolkit@v0.2.30
+        with:
+          method: network
+
+      # Best-effort ROCm 7.12 (TheRock), matching the version Lemonade pins.
+      # Marked experimental: this leg is allowed to fail.
+      - name: ROCm 7.12 (Linux)
+        if: matrix.backend == 'rocm' && matrix.os == 'linux'
+        shell: bash
+        run: |
+          set -e
+          sudo mkdir -p --mode=0755 /etc/apt/keyrings
+          wget -qO- https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.12 jammy main" | sudo tee /etc/apt/sources.list.d/rocm.list
+          sudo apt-get update -qq
+          sudo apt-get install -y rocm-hip-sdk rocminfo || sudo apt-get install -y rocm-dev
+          echo "ROCM_PATH=/opt/rocm" >> "$GITHUB_ENV"
+          echo "/opt/rocm/bin" >> "$GITHUB_PATH"
+
+      - name: ROCm 7.12 (Windows)
+        if: matrix.backend == 'rocm' && matrix.os == 'windows'
+        shell: bash
+        run: |
+          echo "Windows ROCm/HIP via TheRock is not yet wired up; failing this allow-failure leg."
+          exit 1
+
+      - name: Configure & build
+        shell: bash
+        run: |
+          set -e
+          case "${{ matrix.backend }}" in
+            vulkan) FLAGS="-DGGML_VULKAN=ON" ;;
+            cuda)   FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90" ;;
+            rocm)   FLAGS="-DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1100;gfx1151;gfx942 -DCMAKE_C_COMPILER=hipcc -DCMAKE_CXX_COMPILER=hipcc" ;;
+          esac
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release $FLAGS
+          cmake --build build --target trellis-server -j
+
+      - name: Package
+        shell: bash
+        run: |
+          set -e
+          mkdir -p dist
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            cp build/trellis-server.exe dist/
+            cp build/*.dll dist/ 2>/dev/null || true
+            ASSET="trellis-${{ matrix.backend }}-windows-x64.zip"
+            (cd dist && 7z a -y "../$ASSET" ./* >/dev/null)
+          else
+            cp build/trellis-server dist/
+            cp -P build/libggml*.so* dist/ 2>/dev/null || true
+            ASSET="trellis-${{ matrix.backend }}-linux-x64.tar.gz"
+            tar -C dist -czf "$ASSET" .
+          fi
+          echo "ASSET=$ASSET" >> "$GITHUB_ENV"
+
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "value=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release upload "${{ steps.tag.outputs.value }}" "$ASSET" --clobber --repo "${{ github.repository }}"
