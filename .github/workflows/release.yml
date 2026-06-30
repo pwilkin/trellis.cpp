@@ -118,6 +118,10 @@ jobs:
           else
             cp build/trellis-server dist/
             cp -P build/libggml*.so* dist/ 2>/dev/null || true
+            # ggml's own .so keep an absolute build-dir RUNPATH; rewrite every ELF
+            # to $ORIGIN so the bundle is self-contained after relocation.
+            sudo apt-get install -y -qq patchelf
+            for f in $(find dist -type f); do patchelf --set-rpath '$ORIGIN' "$f" 2>/dev/null || true; done
             ASSET="trellis-${{ matrix.backend }}-linux-x64.tar.gz"
             tar -C dist -czf "$ASSET" .
           fi
