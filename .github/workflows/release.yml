@@ -104,15 +104,34 @@ jobs:
             echo "HIP_PATH=/opt/rocm"
             echo "HIP_PLATFORM=amd"
             echo "LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:/opt/rocm/llvm/lib"
+            echo "ROCM_CC=/opt/rocm/llvm/bin/clang"
+            echo "ROCM_CXX=/opt/rocm/llvm/bin/clang++"
           } >> "$GITHUB_ENV"
           echo "/opt/rocm/bin:/opt/rocm/llvm/bin" >> "$GITHUB_PATH"
 
-      - name: ROCm (Windows)
+      - name: ROCm TheRock (Windows, gfx1151)
         if: matrix.backend == 'rocm' && matrix.os == 'windows'
         shell: bash
         run: |
-          echo "Windows ROCm/HIP via TheRock is not yet wired up; failing this allow-failure leg."
-          exit 1
+          set -e
+          base="https://rocm.nightlies.amd.com/tarball-multi-arch"
+          prefix="therock-dist-windows-gfx1151-"
+          files=$(curl -s "$base/" | tr '\n' ' ' | grep -oP 'const files = \K\[.*?\](?=\s*;)')
+          latest=$(echo "$files" | jq -r --arg p "$prefix" \
+            '[.[]|select(.name|startswith($p))|select(.name|test("[0-9]{8}\\.tar\\.gz$"))]|sort_by(.name|capture("(?<d>[0-9]{8})\\.tar\\.gz$").d)|last|.name // empty')
+          test -n "$latest"
+          echo "TheRock tarball: $latest"
+          mkdir -p rocm
+          curl -sL "$base/$latest" | tar -xzf - -C rocm --strip-components=1
+          HIP=$(cygpath -m "$PWD/rocm")
+          {
+            echo "HIP_PATH=$HIP"
+            echo "HIP_PLATFORM=amd"
+            echo "ROCM_CC=$HIP/lib/llvm/bin/clang.exe"
+            echo "ROCM_CXX=$HIP/lib/llvm/bin/clang++.exe"
+          } >> "$GITHUB_ENV"
+          echo "$PWD/rocm/bin" >> "$GITHUB_PATH"
+          echo "$PWD/rocm/lib/llvm/bin" >> "$GITHUB_PATH"
 
       - name: Configure & build
         shell: bash
@@ -121,7 +140,8 @@ jobs:
           case "${{ matrix.backend }}" in
             vulkan) FLAGS="-DGGML_VULKAN=ON" ;;
             cuda)   FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90" ;;
-            rocm)   FLAGS="-DGGML_HIP=ON -DGPU_TARGETS=gfx1151 -DCMAKE_C_COMPILER=/opt/rocm/llvm/bin/clang -DCMAKE_CXX_COMPILER=/opt/rocm/llvm/bin/clang++" ;;
+            # One flagship gfx per consumer family (RX6000/7000/9000 + Strix Halo).
+            rocm)   FLAGS="-DGGML_HIP=ON -DGPU_TARGETS=gfx1030;gfx1100;gfx1151;gfx1201 -DCMAKE_C_COMPILER=$ROCM_CC -DCMAKE_CXX_COMPILER=$ROCM_CXX -DCMAKE_PREFIX_PATH=$HIP_PATH -DCMAKE_HIP_COMPILER=$ROCM_CXX" ;;
           esac
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release $FLAGS ${SPIRV_HEADERS_ROOT:+-DCMAKE_PREFIX_PATH=$SPIRV_HEADERS_ROOT}
           cmake --build build --target trellis-server -j
@@ -139,19 +159,8 @@ jobs:
           else
             cp build/trellis-server dist/
             cp -P build/libggml*.so* dist/ 2>/dev/null || true
-            if [ "${{ matrix.backend }}" = "rocm" ]; then
-              for l in libhipblas librocblas libamdhip64 librocsolver libroctx64 libhipblaslt \
-                       librocprofiler-register libamd_comgr libamd_comgr_loader libhsa-runtime64 \
-                       librocroller librocm_kpack; do
-                cp -vP /opt/rocm/lib/$l.so* dist/ 2>/dev/null || true
-              done
-              cp -vP /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_*.so* dist/ 2>/dev/null || true
-              cp -vP /opt/rocm/lib/llvm/lib/libLLVM.so* /opt/rocm/lib/llvm/lib/libclang-cpp.so* dist/ 2>/dev/null || true
-              [ -d /opt/rocm/lib/rocblas/library ]   && { mkdir -p dist/rocblas;   cp -r /opt/rocm/lib/rocblas/library   dist/rocblas/library; }
-              [ -d /opt/rocm/lib/hipblaslt/library ] && { mkdir -p dist/hipblaslt; cp -r /opt/rocm/lib/hipblaslt/library dist/hipblaslt/library; }
-            fi
-            # ggml's own .so keep an absolute build-dir RUNPATH; rewrite every ELF
-            # to $ORIGIN so the bundle is self-contained after relocation.
+            # Slim: the ROCm runtime comes from the shared TheRock SDK that Lemonade
+            # installs per the user's gfx arch (via LD_LIBRARY_PATH), not bundled here.
             sudo apt-get install -y -qq patchelf
             for f in $(find dist -type f); do patchelf --set-rpath '$ORIGIN' "$f" 2>/dev/null || true; done
             ASSET="trellis-${{ matrix.backend }}-linux-x64.tar.gz"
