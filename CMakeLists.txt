@@ -96,6 +96,10 @@ if(TARGET ggml-vulkan)
   target_link_libraries(trellis_core PUBLIC ggml-vulkan)
   message(STATUS "trellis.cpp: Vulkan backend enabled")
 endif()
+if(TARGET ggml-hip)
+  target_link_libraries(trellis_core PUBLIC ggml-hip)
+  message(STATUS "trellis.cpp: HIP/ROCm backend enabled")
+endif()
 
 # --- executables -----------------------------------------------------------
 add_executable(trellis-smoke src/smoke_test.cpp)

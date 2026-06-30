@@ -64,6 +64,16 @@ jobs:
           vulkan_version: 1.4.309.0
           install_runtime: true
           cache: true
+      - name: SPIRV-Headers (Windows Vulkan)
+        if: matrix.backend == 'vulkan' && matrix.os == 'windows'
+        shell: bash
+        run: |
+          set -e
+          git clone --depth 1 --branch vulkan-sdk-1.4.309.0 https://github.com/KhronosGroup/SPIRV-Headers \
+            || git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers
+          cmake -S SPIRV-Headers -B SPIRV-Headers/build -DCMAKE_INSTALL_PREFIX="$PWD/spirv-headers-install"
+          cmake --build SPIRV-Headers/build --target install --config Release
+          echo "SPIRV_HEADERS_ROOT=$(cygpath -m "$PWD/spirv-headers-install")" >> "$GITHUB_ENV"
 
       - name: CUDA toolkit
         if: matrix.backend == 'cuda'
@@ -73,20 +83,31 @@ jobs:
 
       # Best-effort ROCm 7.12 (TheRock), matching the version Lemonade pins.
       # Marked experimental: this leg is allowed to fail.
-      - name: ROCm 7.12 (Linux)
+      # ROCm via TheRock (gfx1151, Strix Halo — Lemonade's validated target).
+      # Best-effort: allow-failure (no AMD GPU in CI to run-test).
+      - name: ROCm TheRock (Linux, gfx1151)
         if: matrix.backend == 'rocm' && matrix.os == 'linux'
         shell: bash
         run: |
           set -e
-          sudo mkdir -p --mode=0755 /etc/apt/keyrings
-          wget -qO- https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
-          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.12 jammy main" | sudo tee /etc/apt/sources.list.d/rocm.list
-          sudo apt-get update -qq
-          sudo apt-get install -y rocm-hip-sdk rocminfo || sudo apt-get install -y rocm-dev
-          echo "ROCM_PATH=/opt/rocm" >> "$GITHUB_ENV"
-          echo "/opt/rocm/bin" >> "$GITHUB_PATH"
+          base="https://rocm.nightlies.amd.com/tarball-multi-arch"
+          prefix="therock-dist-linux-gfx1151-"
+          files=$(curl -s "$base/" | tr '\n' ' ' | grep -oP 'const files = \K\[.*?\](?=\s*;)')
+          latest=$(echo "$files" | jq -r --arg p "$prefix" \
+            '[.[]|select(.name|startswith($p))|select(.name|test("[0-9]{8}\\.tar\\.gz$"))]|sort_by(.name|capture("(?<d>[0-9]{8})\\.tar\\.gz$").d)|last|.name // empty')
+          test -n "$latest"
+          echo "TheRock tarball: $latest"
+          sudo mkdir -p /opt/rocm
+          curl -sL "$base/$latest" | sudo tar --use-compress-program=gzip -xf - -C /opt/rocm --strip-components=1
+          {
+            echo "ROCM_PATH=/opt/rocm"
+            echo "HIP_PATH=/opt/rocm"
+            echo "HIP_PLATFORM=amd"
+            echo "LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:/opt/rocm/llvm/lib"
+          } >> "$GITHUB_ENV"
+          echo "/opt/rocm/bin:/opt/rocm/llvm/bin" >> "$GITHUB_PATH"
 
-      - name: ROCm 7.12 (Windows)
+      - name: ROCm (Windows)
         if: matrix.backend == 'rocm' && matrix.os == 'windows'
         shell: bash
         run: |
@@ -100,9 +121,9 @@ jobs:
           case "${{ matrix.backend }}" in
             vulkan) FLAGS="-DGGML_VULKAN=ON" ;;
             cuda)   FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90" ;;
-            rocm)   FLAGS="-DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1100;gfx1151;gfx942 -DCMAKE_C_COMPILER=hipcc -DCMAKE_CXX_COMPILER=hipcc" ;;
+            rocm)   FLAGS="-DGGML_HIP=ON -DGPU_TARGETS=gfx1151 -DCMAKE_C_COMPILER=/opt/rocm/llvm/bin/clang -DCMAKE_CXX_COMPILER=/opt/rocm/llvm/bin/clang++" ;;
           esac
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release $FLAGS
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release $FLAGS ${SPIRV_HEADERS_ROOT:+-DCMAKE_PREFIX_PATH=$SPIRV_HEADERS_ROOT}
           cmake --build build --target trellis-server -j
 
       - name: Package
@@ -118,6 +139,17 @@ jobs:
           else
             cp build/trellis-server dist/
             cp -P build/libggml*.so* dist/ 2>/dev/null || true
+            if [ "${{ matrix.backend }}" = "rocm" ]; then
+              for l in libhipblas librocblas libamdhip64 librocsolver libroctx64 libhipblaslt \
+                       librocprofiler-register libamd_comgr libamd_comgr_loader libhsa-runtime64 \
+                       librocroller librocm_kpack; do
+                cp -vP /opt/rocm/lib/$l.so* dist/ 2>/dev/null || true
+              done
+              cp -vP /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_*.so* dist/ 2>/dev/null || true
+              cp -vP /opt/rocm/lib/llvm/lib/libLLVM.so* /opt/rocm/lib/llvm/lib/libclang-cpp.so* dist/ 2>/dev/null || true
+              [ -d /opt/rocm/lib/rocblas/library ]   && { mkdir -p dist/rocblas;   cp -r /opt/rocm/lib/rocblas/library   dist/rocblas/library; }
+              [ -d /opt/rocm/lib/hipblaslt/library ] && { mkdir -p dist/hipblaslt; cp -r /opt/rocm/lib/hipblaslt/library dist/hipblaslt/library; }
+            fi
             # ggml's own .so keep an absolute build-dir RUNPATH; rewrite every ELF
             # to $ORIGIN so the bundle is self-contained after relocation.
             sudo apt-get install -y -qq patchelf
