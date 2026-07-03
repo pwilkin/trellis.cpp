@@ -141,7 +141,7 @@ jobs:
             vulkan) FLAGS="-DGGML_VULKAN=ON" ;;
             cuda)   FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90" ;;
             # One flagship gfx per consumer family (RX6000/7000/9000 + Strix Halo).
-            rocm)   FLAGS="-DGGML_HIP=ON -DGPU_TARGETS=gfx1030;gfx1100;gfx1151;gfx1201 -DCMAKE_C_COMPILER=$ROCM_CC -DCMAKE_CXX_COMPILER=$ROCM_CXX -DCMAKE_PREFIX_PATH=$HIP_PATH -DCMAKE_HIP_COMPILER=$ROCM_CXX" ;;
+            rocm)   FLAGS="-DGGML_HIP=ON -DGGML_HIP_GRAPHS=OFF -DGPU_TARGETS=gfx1030;gfx1100;gfx1151;gfx1201 -DCMAKE_C_COMPILER=$ROCM_CC -DCMAKE_CXX_COMPILER=$ROCM_CXX -DCMAKE_PREFIX_PATH=$HIP_PATH -DCMAKE_HIP_COMPILER=$ROCM_CXX" ;;
           esac
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release $FLAGS ${SPIRV_HEADERS_ROOT:+-DCMAKE_PREFIX_PATH=$SPIRV_HEADERS_ROOT}
           cmake --build build --target trellis-server -j
