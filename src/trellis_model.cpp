@@ -34,7 +34,9 @@ static ggml_backend* make_backend(int gpu) {
         ggml_backend_dev_t best = nullptr; size_t best_mem = 0;
         for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
             ggml_backend_dev_t d = ggml_backend_dev_get(i);
-            if (ggml_backend_dev_type(d) != GGML_BACKEND_DEVICE_TYPE_GPU) continue;
+            enum ggml_backend_dev_type t = ggml_backend_dev_type(d);
+            // IGPU: integrated GPUs (e.g. Vulkan on a UMA APU) report a distinct type.
+            if (t != GGML_BACKEND_DEVICE_TYPE_GPU && t != GGML_BACKEND_DEVICE_TYPE_IGPU) continue;
             ggml_backend_dev_props pr; ggml_backend_dev_get_props(d, &pr);
             if (pr.memory_total > best_mem) { best_mem = pr.memory_total; best = d; }
         }
