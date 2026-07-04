@@ -66,12 +66,9 @@ if(TARGET ggml-cuda)
 else()
   # No CUDA kernel in this build. Run BiRefNet's deformable conv on the GPU via a
   # Vulkan compute shader when ggml is using Vulkan (CPU is minutes at its larger
-  # decoder scales); otherwise on the CPU, OpenMP-parallel over output channels.
+  # decoder scales); otherwise on the CPU, std::thread-parallel over output
+  # channels (see deform_conv_cpu.cpp) -- no OpenMP/libomp dependency.
   target_sources(trellis_core PRIVATE src/deform_conv_cpu.cpp)
-  find_package(OpenMP QUIET)
-  if(OpenMP_CXX_FOUND)
-    target_link_libraries(trellis_core PUBLIC OpenMP::OpenMP_CXX)
-  endif()
   if(TARGET ggml-vulkan)
     find_package(Vulkan REQUIRED COMPONENTS glslc)
     set(DEFORM_SPV_H ${CMAKE_CURRENT_BINARY_DIR}/deform_conv_comp.h)

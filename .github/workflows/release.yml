@@ -145,6 +145,16 @@ jobs:
             # One flagship gfx per consumer family (RX6000/7000/9000 + Strix Halo).
             rocm)   FLAGS="-DGGML_HIP=ON -DGGML_HIP_GRAPHS=OFF -DGPU_TARGETS=gfx1030;gfx1100;gfx1151;gfx1201 -DCMAKE_C_COMPILER=$ROCM_CC -DCMAKE_CXX_COMPILER=$ROCM_CXX -DCMAKE_PREFIX_PATH=$HIP_PATH -DCMAKE_HIP_COMPILER=$ROCM_CXX" ;;
           esac
+          # Windows builds only: TheRock's Windows ROCm dist ships a minimal
+          # Clang toolchain (enough to compile HIP kernels) but not the LLVM
+          # OpenMP runtime, so a ggml-cpu linked against OpenMP fails to start
+          # (missing libomp140.x86_64.dll). ggml has its own portable thread
+          # pool for exactly this case; use it instead of chasing the DLL.
+          # (trellis.cpp's own deform_conv_cpu.cpp no longer uses OpenMP
+          # either -- see CMakeLists.txt / src/deform_conv_cpu.cpp.)
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            FLAGS="$FLAGS -DGGML_OPENMP=OFF"
+          fi
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release $FLAGS ${SPIRV_HEADERS_ROOT:+-DCMAKE_PREFIX_PATH=$SPIRV_HEADERS_ROOT}
           cmake --build build --target trellis-server -j
 
