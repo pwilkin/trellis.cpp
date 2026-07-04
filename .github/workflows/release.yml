@@ -139,7 +139,9 @@ jobs:
           set -e
           case "${{ matrix.backend }}" in
             vulkan) FLAGS="-DGGML_VULKAN=ON" ;;
-            cuda)   FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90" ;;
+            # ggml rewrites 12x -> 12xa (arch-specific); Blackwell ships SASS-only
+            # (120a can't be virtual), so no PTX fallback entry here.
+            cuda)   FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90;120" ;;
             # One flagship gfx per consumer family (RX6000/7000/9000 + Strix Halo).
             rocm)   FLAGS="-DGGML_HIP=ON -DGGML_HIP_GRAPHS=OFF -DGPU_TARGETS=gfx1030;gfx1100;gfx1151;gfx1201 -DCMAKE_C_COMPILER=$ROCM_CC -DCMAKE_CXX_COMPILER=$ROCM_CXX -DCMAKE_PREFIX_PATH=$HIP_PATH -DCMAKE_HIP_COMPILER=$ROCM_CXX" ;;
           esac
@@ -154,13 +156,38 @@ jobs:
           if [ "${{ matrix.os }}" = "windows" ]; then
             cp build/trellis-server.exe dist/
             cp build/*.dll dist/ 2>/dev/null || true
+            if [ "${{ matrix.backend }}" = "cuda" ]; then
+              # $CUDA_PATH is a Windows path (backslashes/spaces) that breaks bash
+              # globbing. CUDA 13 also relocated the Windows runtime DLLs out of
+              # bin/ (into bin/x64), so locate each wherever it lives under the
+              # toolkit and fail loudly (set -e) rather than shipping a zip with
+              # no CUDA runtime.
+              cuda_root="$(cygpath -u "$CUDA_PATH")"
+              echo "== CUDA runtime DLLs found under $cuda_root =="
+              find "$cuda_root" -type f \( -name 'cudart64_*.dll' -o -name 'cublas64_*.dll' -o -name 'cublasLt64_*.dll' \) -print
+              for dll in cudart64 cublas64 cublasLt64; do
+                src="$(find "$cuda_root" -type f -name "${dll}_*.dll" -print -quit)"
+                if [ -z "$src" ]; then echo "ERROR: ${dll}_*.dll not found under CUDA toolkit"; exit 1; fi
+                cp "$src" dist/
+              done
+              ls -la dist/*.dll
+            fi
             ASSET="trellis-${{ matrix.backend }}-windows-x64.zip"
             (cd dist && 7z a -y "../$ASSET" ./* >/dev/null)
           else
             cp build/trellis-server dist/
             cp -P build/libggml*.so* dist/ 2>/dev/null || true
-            # Slim: the ROCm runtime comes from the shared TheRock SDK that Lemonade
-            # installs per the user's gfx arch (via LD_LIBRARY_PATH), not bundled here.
+            # The ROCm runtime comes from the shared TheRock SDK that Lemonade
+            # installs per the user's gfx arch (via LD_LIBRARY_PATH), not bundled
+            # here. CUDA has no such shared SDK, so bundle its runtime next to the
+            # binary (mirrors sd-cpp / llama.cpp); the $ORIGIN rpath below then
+            # resolves it with no system CUDA toolkit required.
+            if [ "${{ matrix.backend }}" = "cuda" ]; then
+              cuda_lib="${CUDA_PATH:-/usr/local/cuda}/lib64"
+              for l in libcudart libcublas libcublasLt; do
+                cp -P "$cuda_lib"/$l.so* dist/ 2>/dev/null || true
+              done
+            fi
             sudo apt-get install -y -qq patchelf
             for f in $(find dist -type f); do patchelf --set-rpath '$ORIGIN' "$f" 2>/dev/null || true; done
             ASSET="trellis-${{ matrix.backend }}-linux-x64.tar.gz"
