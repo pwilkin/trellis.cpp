@@ -1,5 +1,4 @@
-// Thin CLI entry point: parse args (CLI flags with TRELLIS_* env fallback), then
-// run the shared trellis_run() pipeline.
+// Thin CLI entry point: parse args, then run the shared trellis_run() pipeline.
 #include "trellis_args.h"
 #include "trellis_run.h"
 #include <cstdio>

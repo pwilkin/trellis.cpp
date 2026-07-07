@@ -5,7 +5,7 @@
 //                      fields "seed", "resolution" (512/1024/1536), "bg_removal"
 //                      (threshold|birefnet). Returns model/gltf-binary.
 //
-// Launch-time defaults come from CLI flags / TRELLIS_* env (see trellis::parse_args);
+// Launch-time defaults come from CLI flags (see trellis::parse_args);
 // each request copies those defaults and applies its own overrides. The model
 // directory is resolved once; each request runs the full pipeline via trellis_run()
 // (per-stage load/free, like trellis-cli), serialized by a mutex. Keeping the

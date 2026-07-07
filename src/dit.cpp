@@ -11,7 +11,7 @@ namespace trellis {
 using T = ggml_tensor;
 
 static bool g_cast_f32 = false;   // set per build_dit_dense call
-bool g_no_fa = false;             // TRELLIS_NOFA / --no-fa; set by trellis_run (env fallback below)
+bool g_no_fa = false;             // --no-fa; set by trellis_run
 
 static T* lin(ggml_context* c, const Model& m, const std::string& p, T* x) {
     T* w = m.get(p + ".weight");
@@ -77,8 +77,8 @@ static T* sdpa(ggml_context* c, T* q, T* k, T* v, int d_model, T* mask = nullptr
     //      remove the garbage tile, AND unlock the aligned (Lk%256==0) kernel path.
     //  (2) Use **BF16** (not F16) for K/V so HR activations can't overflow F16's +-65504 range;
     //      BF16 shares F32's exponent range and matches the reference's bf16 checkpoints.
-    // (--no-fa / TRELLIS_NOFA forces the original soft_max path, for A/B + fallback.)
-    const bool no_fa = g_no_fa || (std::getenv("TRELLIS_NOFA") != nullptr);
+    // (--no-fa forces the original soft_max path, for A/B + fallback.)
+    const bool no_fa = g_no_fa;
     if (!no_fa) {
         const int64_t KQ_STRIDE = 256;
         auto prep_kv = [&](T* x) {                              // -> [hd, Lk_pad, nh] BF16

@@ -254,7 +254,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         // UV method: default to the voxel-native 6-way box projection (uv_box_project) — O(F), no
         // xatlas. xatlas chart-compute is ~superlinear in faces (grid 384 -> 382K faces hung >9min)
         // and only spreads across ~2 cores even though it's multithreaded, so it dominated the bake
-        // (minutes); box projection is seconds. TRELLIS_XATLAS=1 restores xatlas for tighter packing.
+        // (minutes); box projection is seconds. --xatlas restores xatlas for tighter packing.
         const bool boxuv = !cfg.xatlas;
         const int T = cfg.tex >= 0 ? cfg.tex : (cascade ? 1536 : 1024);
         // Cluster-decimate to the tri budget first either way (props rely on --decim for this);

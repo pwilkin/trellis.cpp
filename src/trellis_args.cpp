@@ -19,55 +19,32 @@ void print_usage(const char* argv0, bool server) {
             argv0, argv0);
     }
     fprintf(stderr,
-        "\nEvery option also reads a TRELLIS_* / GSS / GSH environment variable as a\n"
-        "fallback; an explicit flag overrides the environment.\n\n"
+        "\n"
         "  -i, --image PATH        input image                  (image->3D)\n"
         "  -o, --output PATH       output .glb                  (default model.glb)\n"
-        "  -m, --models DIR        GGUF model directory         (TRELLIS_MODELS)\n"
+        "  -m, --models DIR        GGUF model directory\n"
         "      --gpu N             GPU index, <0 = CPU          (default 0)\n"
         "  -s, --seed N            RNG seed                     (default 42)\n"
-        "      --res 512|1024|1536 geometry resolution          (TRELLIS_512/TRELLIS_HRRES)\n"
-        "      --max-tokens N      HR token budget              (TRELLIS_MAXTOK, default 49152)\n"
-        "      --bg-removal MODE   threshold | birefnet         (TRELLIS_BIREFNET)\n"
+        "      --res 512|1024|1536 geometry resolution\n"
+        "      --max-tokens N      HR token budget              (default 49152)\n"
+        "      --bg-removal MODE   threshold | birefnet\n"
         "      --birefnet          alias for --bg-removal birefnet\n"
-        "      --no-texture        geometry only                (TRELLIS_NOTEX)\n"
-        "      --xatlas            xatlas UV (else box project)  (TRELLIS_XATLAS)\n"
+        "      --no-texture        geometry only\n"
+        "      --xatlas            xatlas UV (else box project)\n"
         "      --box-uv            voxel-native box projection (default)\n"
-        "      --decim GRID        decimation cluster grid       (TRELLIS_DECIM)\n"
-        "      --atlas PX          UV atlas size                 (TRELLIS_TEX)\n"
-        "      --f32               f32 sparse-conv compute       (TRELLIS_F32)\n"
-        "      --no-fa             disable FlashAttention        (TRELLIS_NOFA)\n"
-        "      --require-gpu       refuse CPU fallback           (TRELLIS_REQUIRE_GPU)\n"
-        "      --gss F  --gsh F    guidance strengths            (GSS / GSH)\n"
+        "      --decim GRID        decimation cluster grid\n"
+        "      --atlas PX          UV atlas size\n"
+        "      --f32               f32 sparse-conv compute\n"
+        "      --no-fa             disable FlashAttention\n"
+        "      --require-gpu       refuse CPU fallback\n"
+        "      --gss F  --gsh F    guidance strengths\n"
         "      --host H  --port P  trellis-server bind address\n"
+        "      --voxply            also dump the voxel point cloud as .ply\n"
+        "      --dump-slat         dump the structured latent to disk\n"
         "  -h, --help              show this help\n");
 }
 
-static bool envb(const char* k) { return std::getenv(k) != nullptr; }
-
-// Read environment values into the defaults so a bare CLI inherits the historical
-// TRELLIS_* behavior; flags parsed afterwards take precedence.
-static void apply_env(TrellisParams& p) {
-    if (const char* v = std::getenv("TRELLIS_MODELS")) p.models = v;
-    if (envb("TRELLIS_512"))                           p.cascade = false;
-    if (const char* v = std::getenv("TRELLIS_HRRES"))  { p.hr_res = atoi(v); p.cascade = true; }
-    if (const char* v = std::getenv("TRELLIS_MAXTOK")) p.max_tokens = atoi(v);
-    if (envb("TRELLIS_BIREFNET"))                      p.birefnet = true;
-    if (envb("TRELLIS_NOTEX"))                         p.texture = false;
-    if (envb("TRELLIS_XATLAS"))                        p.xatlas = true;
-    if (const char* v = std::getenv("TRELLIS_DECIM"))  p.decim = atoi(v);
-    if (const char* v = std::getenv("TRELLIS_TEX"))    p.tex = atoi(v);
-    if (envb("TRELLIS_F32"))                           p.f32 = true;
-    if (envb("TRELLIS_NOFA"))                          p.no_fa = true;
-    if (envb("TRELLIS_REQUIRE_GPU"))                   p.require_gpu = true;
-    if (const char* v = std::getenv("GSS"))            p.gss = (float)atof(v);
-    if (const char* v = std::getenv("GSH"))            p.gsh = (float)atof(v);
-    if (envb("TRELLIS_VOXPLY"))                        p.voxply = true;
-    if (envb("TRELLIS_DUMP_SLAT"))                     p.dump_slat = true;
-}
-
 bool parse_args(int argc, char** argv, TrellisParams& p) {
-    apply_env(p);
     int positional = 0;
 
     for (int i = 1; i < argc; ++i) {
