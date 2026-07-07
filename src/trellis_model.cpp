@@ -9,10 +9,24 @@
 #include "ggml-cuda.h"
 #endif
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+
+namespace {
+// plain fseek()'s offset is a 32-bit `long` under MSVC even in 64-bit builds,
+// so it silently truncates offsets past 2GB -- fatal for the flow GGUFs here,
+// which run ~2.4GB.
+int trellis_fseek64(FILE* f, int64_t offset, int origin) {
+#ifdef _WIN32
+    return _fseeki64(f, offset, origin);
+#else
+    return fseeko(f, (off_t) offset, origin);
+#endif
+}
+}  // namespace
 
 namespace trellis {
 
@@ -96,7 +110,7 @@ Model Model::load(const std::string& path, int gpu) {
         const size_t nbytes = ggml_nbytes(t);
         const size_t off = data_off + gguf_get_tensor_offset(m.gguf, i);
         staging.resize(nbytes);
-        if (fseek(f, (long)off, SEEK_SET) != 0 ||
+        if (trellis_fseek64(f, (int64_t)off, SEEK_SET) != 0 ||
             fread(staging.data(), 1, nbytes, f) != nbytes) {
             fclose(f);
             throw std::runtime_error(std::string("short read for tensor ") + name);

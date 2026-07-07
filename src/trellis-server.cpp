@@ -68,6 +68,7 @@ int main(int argc, char** argv) {
         p.output = stem + ".glb";
 
         std::string glb;
+        std::string error_message = "3D reconstruction failed";
         {
             std::lock_guard<std::mutex> lk(gen_mu);
             if (!write_file_bytes(p.image, image.content)) {
@@ -78,8 +79,13 @@ int main(int argc, char** argv) {
             fprintf(stderr, "[trellis-server] generate: %zu-byte image, seed %u, res %s, bg %s\n",
                     image.content.size(), p.seed, p.cascade ? std::to_string(p.hr_res).c_str() : "512",
                     p.birefnet ? "birefnet" : "threshold");
-            int rc = trellis_run(p);
-            if (rc == 0) glb = read_file_bytes(p.output);
+            try {
+                int rc = trellis_run(p);
+                if (rc == 0) glb = read_file_bytes(p.output);
+            } catch (const std::exception& e) {
+                fprintf(stderr, "[trellis-server] generate failed: %s\n", e.what());
+                error_message = e.what();
+            }
             std::remove(p.image.c_str());
             std::remove(p.output.c_str());
             // trellis_run also writes sibling debug artifacts; clean them up too.
@@ -89,7 +95,20 @@ int main(int argc, char** argv) {
 
         if (glb.empty()) {
             res.status = 500;
-            res.set_content("{\"error\":\"3D reconstruction failed\"}", "application/json");
+            std::string escaped;
+            for (char c : error_message) {
+                switch (c) {
+                    case '"':  escaped += "\\\""; break;
+                    case '\\': escaped += "\\\\"; break;
+                    case '\n': escaped += "\\n";  break;
+                    case '\r': escaped += "\\r";  break;
+                    case '\t': escaped += "\\t";  break;
+                    default:
+                        if ((unsigned char)c < 0x20) break;
+                        escaped += c;
+                }
+            }
+            res.set_content("{\"error\":\"" + escaped + "\"}", "application/json");
             return;
         }
         res.set_content(glb.data(), glb.size(), "model/gltf-binary");
