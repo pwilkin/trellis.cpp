@@ -14,7 +14,9 @@
 #include "trellis_run.h"
 #include "httplib.h"
 
+#include <atomic>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <string>
@@ -33,9 +35,24 @@ bool write_file_bytes(const std::string& path, const std::string& data) {
     return f.good();
 }
 
+// std::tmpnam on MSVC yields drive-root paths ("\sXXX.N") that a non-elevated
+// process cannot write; stage scratch files in the real temp directory instead.
+std::string temp_stem() {
+    static std::atomic<unsigned> counter{0};
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::temp_directory_path(ec);
+    if (ec) dir = ".";
+    auto n = counter.fetch_add(1);
+    return (dir / ("trellis-req-" + std::to_string(n))).string();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Stage progress goes to stdout, which is fully buffered when piped (e.g.
+    // under Lemonade's output capture) — keep it line-visible for diagnostics.
+    setvbuf(stdout, nullptr, _IONBF, 0);
+
     trellis::TrellisParams base;
     if (!trellis::parse_args(argc, argv, base)) {
         trellis::print_usage(argv[0], /*server=*/true);
@@ -63,7 +80,7 @@ int main(int argc, char** argv) {
         if (req.has_file("resolution")) p.set_res(atoi(req.get_file_value("resolution").content.c_str()));
         if (req.has_file("bg_removal")) p.birefnet = (req.get_file_value("bg_removal").content == "birefnet");
 
-        const std::string stem = std::string(std::tmpnam(nullptr));
+        const std::string stem = temp_stem();
         p.image  = stem + ".png";
         p.output = stem + ".glb";
 
