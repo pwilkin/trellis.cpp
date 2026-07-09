@@ -142,8 +142,8 @@ jobs:
             # ggml rewrites 12x -> 12xa (arch-specific); Blackwell ships SASS-only
             # (120a can't be virtual), so no PTX fallback entry here.
             cuda)   FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90;120" ;;
-            # One flagship gfx per consumer family (RX6000/7000/9000 + Strix Halo).
-            rocm)   FLAGS="-DGGML_HIP=ON -DGGML_HIP_GRAPHS=OFF -DGPU_TARGETS=gfx1030;gfx1100;gfx1151;gfx1201 -DCMAKE_C_COMPILER=$ROCM_CC -DCMAKE_CXX_COMPILER=$ROCM_CXX -DCMAKE_PREFIX_PATH=$HIP_PATH -DCMAKE_HIP_COMPILER=$ROCM_CXX" ;;
+            # Popular consumer ISAs: RDNA2 dGPUs, RDNA3 dGPUs + 780M, RDNA3.5 iGPUs, RDNA4.
+            rocm)   FLAGS="-DGGML_HIP=ON -DGGML_HIP_GRAPHS=OFF -DGPU_TARGETS=gfx1030;gfx1031;gfx1032;gfx1100;gfx1101;gfx1102;gfx1103;gfx1150;gfx1151;gfx1152;gfx1200;gfx1201 -DCMAKE_C_COMPILER=$ROCM_CC -DCMAKE_CXX_COMPILER=$ROCM_CXX -DCMAKE_PREFIX_PATH=$HIP_PATH -DCMAKE_HIP_COMPILER=$ROCM_CXX" ;;
           esac
           # Windows builds only: TheRock's Windows ROCm dist ships a minimal
           # Clang toolchain (enough to compile HIP kernels) but not the LLVM
