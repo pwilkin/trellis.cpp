@@ -3,7 +3,9 @@
 //   GET  /health     -> "ok"
 //   POST /generate    multipart/form-data with an "image" file part; optional text
 //                      fields "seed", "resolution" (512/1024/1536), "bg_removal"
-//                      (threshold|birefnet). Returns model/gltf-binary.
+//                      (threshold|birefnet), "uv" (xatlas = default, unique
+//                      chart space; box = faster projection). Returns
+//                      model/gltf-binary.
 //
 // Launch-time defaults come from CLI flags (see trellis::parse_args);
 // each request copies those defaults and applies its own overrides. The model
@@ -79,6 +81,7 @@ int main(int argc, char** argv) {
         if (req.has_file("seed")) p.seed = (uint32_t) atoi(req.get_file_value("seed").content.c_str());
         if (req.has_file("resolution")) p.set_res(atoi(req.get_file_value("resolution").content.c_str()));
         if (req.has_file("bg_removal")) p.birefnet = (req.get_file_value("bg_removal").content == "birefnet");
+        if (req.has_file("uv")) p.xatlas = (req.get_file_value("uv").content == "xatlas");
 
         const std::string stem = temp_stem();
         p.image  = stem + ".png";
@@ -93,9 +96,9 @@ int main(int argc, char** argv) {
                 res.set_content("{\"error\":\"failed to stage input image\"}", "application/json");
                 return;
             }
-            fprintf(stderr, "[trellis-server] generate: %zu-byte image, seed %u, res %s, bg %s\n",
+            fprintf(stderr, "[trellis-server] generate: %zu-byte image, seed %u, res %s, bg %s, uv %s\n",
                     image.content.size(), p.seed, p.cascade ? std::to_string(p.hr_res).c_str() : "512",
-                    p.birefnet ? "birefnet" : "threshold");
+                    p.birefnet ? "birefnet" : "threshold", p.xatlas ? "xatlas" : "box");
             try {
                 int rc = trellis_run(p);
                 if (rc == 0) glb = read_file_bytes(p.output);

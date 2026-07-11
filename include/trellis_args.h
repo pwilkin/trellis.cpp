@@ -30,7 +30,7 @@ struct TrellisParams {
 
     bool birefnet = false;      // BiRefNet bg removal (else white-background threshold)
     bool texture  = true;       // texture flow + UV bake (else geometry-only)
-    bool xatlas   = false;      // xatlas UV unwrap (else voxel-native box projection)
+    bool xatlas   = true;       // xatlas UV unwrap (else voxel-native box projection)
     int  decim    = -1;         // decimation cluster grid   (-1 => per-cascade default)
     int  tex      = -1;         // UV atlas size in px        (-1 => per-cascade default)
     bool f32      = false;      // f32 sparse-conv compute

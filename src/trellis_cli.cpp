@@ -253,10 +253,10 @@ int trellis_run(const trellis::TrellisParams& cfg) {
     printf("[7/7] write %s\n", outglb.c_str());
     bool textured = false;
     if (!pbr6.empty()) {   // UV-baked textured GLB (PBR material)
-        // UV method: default to the voxel-native 6-way box projection (uv_box_project) — O(F), no
-        // xatlas. xatlas chart-compute is ~superlinear in faces (grid 384 -> 382K faces hung >9min)
-        // and only spreads across ~2 cores even though it's multithreaded, so it dominated the bake
-        // (minutes); box projection is seconds. --xatlas restores xatlas for tighter packing.
+        // UV method: xatlas unwrap by default — unique chart space per face, no projection
+        // overlap. --box-uv selects the voxel-native 6-way box projection: O(F) and seconds vs
+        // xatlas's ~superlinear chart-compute (grid 384 -> 382K faces took >9min pre-decimation),
+        // occlusion-aware bucket assignment + depth-tested raster keep its bleed low.
         const bool boxuv = !cfg.xatlas;
         const int T = cfg.tex >= 0 ? cfg.tex : (cascade ? 1536 : 1024);
         // Cluster-decimate to the tri budget first either way (props rely on --decim for this);

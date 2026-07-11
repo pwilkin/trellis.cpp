@@ -5,6 +5,7 @@
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
 
+#include <algorithm>
 #include <string>
 #include <stdexcept>
 
@@ -31,6 +32,27 @@ static ggml_context* mkctx() {
     return ggml_init({ meta, nullptr, true });
 }
 
+// Per-voxel linear (optional per-row LN first), chunked so a single mul_mat
+// never exceeds backend dispatch-grid limits (Vulkan caps grid dim 1 at 65535
+// workgroups = ~2.1M rows; the res-1024 cascade reaches 2.6M voxels).
+static constexpr int64_t kLinearRowChunk = 1000000;
+
+static std::vector<float> linear_rows(const Model& m, const std::vector<float>& in, int Cin,
+                                      int64_t N, const std::string& prefix, int Cout, bool pre_norm) {
+    std::vector<float> out((size_t)Cout * N);
+    for (int64_t r0 = 0; r0 < N; r0 += kLinearRowChunk) {
+        const int64_t n = std::min(kLinearRowChunk, N - r0);
+        ggml_context* c = mkctx();
+        T* gh = ggml_new_tensor_2d(c, GGML_TYPE_F32, Cin, n); ggml_set_input(gh);
+        T* x = pre_norm ? ggml_norm(c, gh, 1e-5f) : gh;
+        x = ggml_add(c, ggml_mul_mat(c, m.get(prefix + ".weight"), x), m.get(prefix + ".bias"));
+        std::vector<float> r = run1(m, c, x, { {gh, in.data() + (size_t)Cin * r0} });
+        std::copy(r.begin(), r.end(), out.begin() + (size_t)Cout * r0);
+        ggml_free(c);
+    }
+    return out;
+}
+
 // Generic SparseUnetVaeDecoder: from_latent -> 4×(ConvNeXt stage + C2S) -> final LN -> output_layer.
 // guide_subs!=null -> tex (C2S driven by provided masks); subs_out!=null -> shape (collect masks).
 static std::vector<float> decode_unet(const Model& m, const std::vector<float>& latent, int out_ch,
@@ -39,14 +61,8 @@ static std::vector<float> decode_unet(const Model& m, const std::vector<float>& 
                                       std::vector<std::vector<uint8_t>>* subs_out,
                                       bool coords_only = false) {
     int N = (int)coords.size();
-    std::vector<float> h;
-    {   // from_latent [32,N] -> [1024,N]
-        ggml_context* c = mkctx();
-        T* gf = ggml_new_tensor_2d(c, GGML_TYPE_F32, 32, N); ggml_set_input(gf);
-        T* o = ggml_add(c, ggml_mul_mat(c, m.get("from_latent.weight"), gf), m.get("from_latent.bias"));
-        h = run1(m, c, o, { {gf, latent.data()} });
-        ggml_free(c);
-    }
+    // from_latent [32,N] -> [1024,N]
+    std::vector<float> h = linear_rows(m, latent, 32, N, "from_latent", 1024, false);
     struct Stage { int C, nblk, Cout, c2si; const char* s; };
     const Stage stages[4] = { {1024,4,512,4,"0"}, {512,16,256,16,"1"}, {256,8,128,8,"2"}, {128,4,64,4,"3"} };
     for (int si = 0; si < 4; ++si) {
@@ -68,16 +84,8 @@ static std::vector<float> decode_unet(const Model& m, const std::vector<float>& 
         h = std::move(r.feats); coords = std::move(r.coords); N = (int)coords.size();
     }
     if (coords_only) return {};   // cascade upsample: just need the grown coords
-    std::vector<float> out;
-    {   // final LN(no affine) + output_layer -> [out_ch, M]
-        ggml_context* c = mkctx();
-        T* gh = ggml_new_tensor_2d(c, GGML_TYPE_F32, 64, N); ggml_set_input(gh);
-        T* x = ggml_norm(c, gh, 1e-5f);
-        x = ggml_add(c, ggml_mul_mat(c, m.get("output_layer.weight"), x), m.get("output_layer.bias"));
-        out = run1(m, c, x, { {gh, h.data()} });
-        ggml_free(c);
-    }
-    return out;
+    // final LN(no affine) + output_layer -> [out_ch, M]
+    return linear_rows(m, h, 64, N, "output_layer", out_ch, true);
 }
 
 ShapeOut shape_decode(const Model& m, const std::vector<float>& latent,
