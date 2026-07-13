@@ -9,6 +9,10 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+#ifdef TRELLIS_HAVE_WEBP
+#include <webp/encode.h>
+#endif
+
 namespace trellis {
 
 static void png_collect(void* ctx, void* data, int size) {
@@ -85,7 +89,8 @@ bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* f
 
 bool write_glb_textured(const char* path, const float* verts, int64_t V, const float* uv,
                         const int32_t* faces, int64_t F,
-                        const unsigned char* base_rgba, const unsigned char* mr_rgba, int T) {
+                        const unsigned char* base_rgba, const unsigned char* mr_rgba, int T,
+                        bool double_sided) {
     // rotate positions (x,z,-y) + min/max
     std::vector<float> pos((size_t)V*3);
     float mn[3]={FLT_MAX,FLT_MAX,FLT_MAX}, mx[3]={-FLT_MAX,-FLT_MAX,-FLT_MAX};
@@ -93,45 +98,86 @@ bool write_glb_textured(const char* path, const float* verts, int64_t V, const f
         for(int c=0;c<3;++c){pos[3*i+c]=p[c]; mn[c]=std::min(mn[c],p[c]); mx[c]=std::max(mx[c],p[c]);} }
     if (V==0){mn[0]=mn[1]=mn[2]=0;mx[0]=mx[1]=mx[2]=0;}
 
-    // encode textures to PNG
+    // area-weighted vertex normals (in the rotated frame) so viewers shade
+    // smoothly instead of the glTF-mandated flat fallback
+    std::vector<float> nrm((size_t)V*3, 0.f);
+    for (int64_t f=0;f<F;++f){
+        const int64_t a=faces[3*f], b=faces[3*f+1], c=faces[3*f+2];
+        float e1[3], e2[3], n[3];
+        for(int k=0;k<3;++k){ e1[k]=pos[3*b+k]-pos[3*a+k]; e2[k]=pos[3*c+k]-pos[3*a+k]; }
+        n[0]=e1[1]*e2[2]-e1[2]*e2[1]; n[1]=e1[2]*e2[0]-e1[0]*e2[2]; n[2]=e1[0]*e2[1]-e1[1]*e2[0];
+        for(int j=0;j<3;++j){ const int64_t v=faces[3*f+j]; for(int k=0;k<3;++k) nrm[3*v+k]+=n[k]; }
+    }
+    for (int64_t i=0;i<V;++i){
+        const float l=std::sqrt(nrm[3*i]*nrm[3*i]+nrm[3*i+1]*nrm[3*i+1]+nrm[3*i+2]*nrm[3*i+2]);
+        if (l>1e-20f) for(int k=0;k<3;++k) nrm[3*i+k]/=l; else nrm[3*i+2]=1.f;
+    }
+
+    // encode textures — lossy WebP at the reference's quality when available,
+    // PNG otherwise
     std::vector<uint8_t> pngB, pngM;
-    stbi_write_png_to_func(png_collect, &pngB, T, T, 4, base_rgba, T*4);
-    stbi_write_png_to_func(png_collect, &pngM, T, T, 4, mr_rgba, T*4);
+    bool webp = false;
+#ifdef TRELLIS_HAVE_WEBP
+    {
+        uint8_t* ob = nullptr; uint8_t* om = nullptr;
+        const size_t nb = WebPEncodeRGBA(base_rgba, T, T, T*4, 80.f, &ob);
+        const size_t nm = WebPEncodeRGBA(mr_rgba, T, T, T*4, 80.f, &om);
+        if (nb && nm) {
+            pngB.assign(ob, ob + nb);
+            pngM.assign(om, om + nm);
+            webp = true;
+        }
+        WebPFree(ob); WebPFree(om);
+    }
+#endif
+    if (!webp) {
+        stbi_write_png_to_func(png_collect, &pngB, T, T, 4, base_rgba, T*4);
+        stbi_write_png_to_func(png_collect, &pngM, T, T, 4, mr_rgba, T*4);
+    }
 
     auto pad4=[](std::vector<uint8_t>&b){ while(b.size()%4) b.push_back(0); };
-    const uint32_t posB=(uint32_t)(V*12), uvB=(uint32_t)(V*8), idxB=(uint32_t)(F*12);
-    std::vector<uint8_t> bin(posB+uvB+idxB);
+    const uint32_t posB=(uint32_t)(V*12), nrmB=(uint32_t)(V*12), uvB=(uint32_t)(V*8), idxB=(uint32_t)(F*12);
+    std::vector<uint8_t> bin(posB+nrmB+uvB+idxB);
     std::memcpy(bin.data(), pos.data(), posB);
-    std::memcpy(bin.data()+posB, uv, uvB);
-    for (int64_t i=0;i<F*3;++i){ uint32_t v=(uint32_t)faces[i]; std::memcpy(bin.data()+posB+uvB+i*4,&v,4); }
-    pad4(bin); const uint32_t off3=(uint32_t)bin.size();
-    bin.insert(bin.end(), pngB.begin(), pngB.end()); pad4(bin); const uint32_t off4=(uint32_t)bin.size();
+    std::memcpy(bin.data()+posB, nrm.data(), nrmB);
+    std::memcpy(bin.data()+posB+nrmB, uv, uvB);
+    for (int64_t i=0;i<F*3;++i){ uint32_t v=(uint32_t)faces[i]; std::memcpy(bin.data()+posB+nrmB+uvB+i*4,&v,4); }
+    pad4(bin); const uint32_t off4=(uint32_t)bin.size();
+    bin.insert(bin.end(), pngB.begin(), pngB.end()); pad4(bin); const uint32_t off5=(uint32_t)bin.size();
     bin.insert(bin.end(), pngM.begin(), pngM.end()); pad4(bin);
 
-    char buf[2400];
+    char buf[3000];
     std::snprintf(buf,sizeof(buf),
         "{\"asset\":{\"version\":\"2.0\",\"generator\":\"trellis.cpp\"},"
+        "%s"
         "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}],"
-        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"TEXCOORD_0\":1},\"indices\":2,\"material\":0,\"mode\":4}]}],"
-        "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0},\"metallicRoughnessTexture\":{\"index\":1},\"metallicFactor\":1.0,\"roughnessFactor\":1.0},\"doubleSided\":true}],"
-        "\"textures\":[{\"source\":0,\"sampler\":0},{\"source\":1,\"sampler\":0}],"
-        "\"images\":[{\"bufferView\":3,\"mimeType\":\"image/png\"},{\"bufferView\":4,\"mimeType\":\"image/png\"}],"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"TEXCOORD_0\":2},\"indices\":3,\"material\":0,\"mode\":4}]}],"
+        "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0},\"metallicRoughnessTexture\":{\"index\":1},\"metallicFactor\":1.0,\"roughnessFactor\":1.0},\"alphaMode\":\"OPAQUE\",\"doubleSided\":%s}],"
+        "%s"
+        "\"images\":[{\"bufferView\":4,\"mimeType\":\"%s\"},{\"bufferView\":5,\"mimeType\":\"%s\"}],"
         "\"samplers\":[{}],"
         "\"accessors\":["
         "{\"bufferView\":0,\"componentType\":5126,\"count\":%lld,\"type\":\"VEC3\",\"min\":[%.9g,%.9g,%.9g],\"max\":[%.9g,%.9g,%.9g]},"
-        "{\"bufferView\":1,\"componentType\":5126,\"count\":%lld,\"type\":\"VEC2\"},"
-        "{\"bufferView\":2,\"componentType\":5125,\"count\":%lld,\"type\":\"SCALAR\"}],"
+        "{\"bufferView\":1,\"componentType\":5126,\"count\":%lld,\"type\":\"VEC3\"},"
+        "{\"bufferView\":2,\"componentType\":5126,\"count\":%lld,\"type\":\"VEC2\"},"
+        "{\"bufferView\":3,\"componentType\":5125,\"count\":%lld,\"type\":\"SCALAR\"}],"
         "\"bufferViews\":["
         "{\"buffer\":0,\"byteOffset\":0,\"byteLength\":%u,\"target\":34962},"
+        "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34962},"
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34962},"
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34963},"
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u},"
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u}],"
         "\"buffers\":[{\"byteLength\":%u}]}",
+        webp ? "\"extensionsUsed\":[\"EXT_texture_webp\"],\"extensionsRequired\":[\"EXT_texture_webp\"]," : "",
+        double_sided ? "true" : "false",
+        webp ? "\"textures\":[{\"sampler\":0,\"extensions\":{\"EXT_texture_webp\":{\"source\":0}}},{\"sampler\":0,\"extensions\":{\"EXT_texture_webp\":{\"source\":1}}}],"
+             : "\"textures\":[{\"source\":0,\"sampler\":0},{\"source\":1,\"sampler\":0}],",
+        webp ? "image/webp" : "image/png", webp ? "image/webp" : "image/png",
         (long long)V, mn[0],mn[1],mn[2],mx[0],mx[1],mx[2],
-        (long long)V, (long long)(F*3),
-        posB, posB,uvB, posB+uvB,idxB,
-        off3,(uint32_t)pngB.size(), off4,(uint32_t)pngM.size(), (uint32_t)bin.size());
+        (long long)V, (long long)V, (long long)(F*3),
+        posB, posB,nrmB, posB+nrmB,uvB, posB+nrmB+uvB,idxB,
+        off4,(uint32_t)pngB.size(), off5,(uint32_t)pngM.size(), (uint32_t)bin.size());
     std::string json(buf);
     while (json.size()%4) json.push_back(' ');
 

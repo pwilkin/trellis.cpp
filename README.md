@@ -29,17 +29,23 @@ The most useful ones:
 | `--res 512\|1024\|1536` | geometry resolution (512 = light path, no cascade) |
 | `--bg-removal threshold\|birefnet` | white-bg keyer vs. full BiRefNet matte (for photos with real backgrounds, ~13s on GPU) |
 | `--no-texture` | geometry only |
-| `--decim GRID` | decimation cluster grid (`0` = keep the full-res mesh) |
-| `--atlas PX` | UV atlas size |
-| `--xatlas` | xatlas unwrap instead of the default box projection (tighter UV packing, much slower) |
+| `--decim GRID` | legacy cluster-grid decimation (default: quadric simplify to 300K faces @1024 / 150K @512; `0` = keep the full-res mesh) |
+| `--atlas PX` | UV atlas size (default 2048 @1024 / 1024 @512) |
+| `--box-uv` | voxel-native 6-way box projection instead of the default xatlas unwrap (O(faces), faster, looser packing) |
 | `--seed N` | RNG seed |
 | `--require-gpu` | fail instead of falling back to the (very slow, RAM-hungry) CPU path |
 
-The mesh is cluster-decimated (vertex clustering, to the tri budget) then UV-unwrapped.
-**The default unwrap is a voxel-native 6-way box projection** (O(faces), seconds):
-xatlas chart-compute is ~superlinear in faces and only spreads across ~2 cores, so it
-used to dominate the bake. Per-vertex PBR (base color + metallic/roughness from the tex
-decoder) is baked into the atlas.
+The postprocess matches the reference pipeline op for op (see
+`docs/spec/27-reference-postprocess.md` / `28-divergence-matrix.md`): the raw
+dual-grid mesh is welded and hole-filled, **remeshed with narrow-band UDF dual
+contouring** into a single clean manifold, quadric-simplified to the face budget,
+coarse-clustered with the reference's bottom-up normal-cone merge, unwrapped with
+stock xatlas per cluster and packed at auto resolution (UVs normalized to fill the
+full atlas), shaded per texel by trilinear sampling of the voxel PBR volume (with
+BVH closest-point snap onto the original surface), gutter-filled with a Telea
+inpaint port, and exported as a GLB with smooth normals and **lossy-WebP textures**
+(`EXT_texture_webp`; PNG fallback when built with `-DTRELLIS_WEBP=OFF`). Output
+quality is at parity with the reference CUDA postprocess on identical inputs.
 
 `TRELLIS_DBG_*` environment variables toggle developer debug logging only; no
 behavior-driving environment variables remain — use the flags above.
@@ -79,7 +85,11 @@ DINOv3 ViT-L/16 feature extractor                [GGML]   → patch tokens [N,10
 ③ Texture-SLAT flow DiT (1.3B, sparse)           [GGML]   → 32-ch latent / active voxel
   │  → Sparse U-Net tex decoder (6-ch PBR per voxel)
   ▼
-textured mesh → GLB
+textured mesh
+  │  weld → fill → narrow-band DC remesh → simplify → cluster + xatlas →
+  │  trilinear PBR bake (BVH snap) → Telea inpaint            [CPU, threaded]
+  ▼
+UV-textured GLB (WebP PBR textures)
 ```
 
 All three flow stages use a `FlowEulerGuidanceIntervalSampler` (rectified-flow Euler,
@@ -117,6 +127,31 @@ folder. Or convert your own from the source checkpoints below (see `docs/spec/` 
 
 The two helper models are HF-gated upstream; the ungated equivalents above avoid needing
 a token.
+
+## Performance
+
+Measured end-to-end (image → GLB, res 1024, 12-step flows, includes model load;
+`docs/spec/29-perf-profile.md` has the per-flow breakdown and methodology):
+
+| input class | Strix Halo iGPU (Vulkan) | RTX 5060 Ti (CUDA) | reference Python, same GPU (cold) |
+|---|---|---|---|
+| light (goblin, 17k HR tokens) | 6:09 | **3:16** | 3:37 |
+| heavy (turret, ~45k HR tokens) | 12:39 | **7:23** | 5:20 |
+
+The CPU postprocess (weld → remesh → simplify → unwrap → bake → WebP) runs in
+~25 s for a 300k-face asset — at parity with the reference's CUDA postprocess.
+On Strix Halo, Vulkan is the fastest backend: ROCm requires
+`GGML_CUDA_DISABLE_GRAPHS=1` (ggml's HIP graph capture stalls on these graphs)
+and still trails Vulkan by 10–40 %.
+
+## Tools
+
+| tool | purpose |
+|------|---------|
+| `post-replay <dump.bin> <out.glb>` | re-run the whole postprocess from a `TRELLIS_DUMP_POST` dump in seconds (flags: `--no-remesh`, `--band`, `--no-snap`, `--box-uv`, `--faces`, `--atlas`, …) |
+| `tools/glb_metrics.py` | CPU geometry/UV/material metrics (components, boundary edges, winding, texel density, doubleSided/WebP flags) for ours-vs-reference GLB comparison |
+| `tools/render_glb.py` / `render_glb_fast.py` | quick multi-view flat renders |
+| `tools/mv_preview/` | PBR-correct GLB previews via the `<model-viewer>` web component (see its README) |
 
 ## Building
 

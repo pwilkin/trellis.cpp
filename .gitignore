@@ -25,3 +25,4 @@ __pycache__/
 /out/
 *.glb
 *.tmp
+dumps/

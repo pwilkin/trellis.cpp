@@ -53,9 +53,40 @@ add_library(trellis_core STATIC
   src/uv_bake.cpp
   src/birefnet.cpp
   thirdparty/xatlas/xatlas.cpp
+  thirdparty/meshoptimizer/simplifier.cpp
+  src/tri_bvh.cpp
+  src/remesh_dc.cpp
 )
-target_include_directories(trellis_core PUBLIC include ${GGML_DIR}/include ${CMAKE_SOURCE_DIR}/thirdparty/stb ${CMAKE_SOURCE_DIR}/thirdparty/xatlas)
+target_include_directories(trellis_core PUBLIC include ${GGML_DIR}/include ${CMAKE_SOURCE_DIR}/thirdparty/stb ${CMAKE_SOURCE_DIR}/thirdparty/xatlas ${CMAKE_SOURCE_DIR}/thirdparty/meshoptimizer ${CMAKE_SOURCE_DIR}/thirdparty/fqms)
 target_link_libraries(trellis_core PUBLIC ggml ggml-base ggml-cpu)
+
+# --- WebP textures (reference-parity GLB export) ---------------------------
+# The reference exports lossy-WebP textures via EXT_texture_webp. Fetched at
+# configure time; disable (or let the fetch fail offline) to fall back to PNG.
+option(TRELLIS_WEBP "Encode GLB textures as WebP (EXT_texture_webp)" ON)
+if(TRELLIS_WEBP)
+  include(FetchContent)
+  set(WEBP_BUILD_ANIM_UTILS OFF CACHE BOOL "" FORCE)
+  set(WEBP_BUILD_CWEBP OFF CACHE BOOL "" FORCE)
+  set(WEBP_BUILD_DWEBP OFF CACHE BOOL "" FORCE)
+  set(WEBP_BUILD_GIF2WEBP OFF CACHE BOOL "" FORCE)
+  set(WEBP_BUILD_IMG2WEBP OFF CACHE BOOL "" FORCE)
+  set(WEBP_BUILD_VWEBP OFF CACHE BOOL "" FORCE)
+  set(WEBP_BUILD_WEBPINFO OFF CACHE BOOL "" FORCE)
+  set(WEBP_BUILD_WEBPMUX OFF CACHE BOOL "" FORCE)
+  set(WEBP_BUILD_EXTRAS OFF CACHE BOOL "" FORCE)
+  set(WEBP_BUILD_LIBWEBPMUX OFF CACHE BOOL "" FORCE)
+  set(BUILD_SHARED_LIBS_SAVED ${BUILD_SHARED_LIBS})
+  set(BUILD_SHARED_LIBS OFF)
+  FetchContent_Declare(libwebp
+    URL https://github.com/webmproject/libwebp/archive/refs/tags/v1.5.0.tar.gz
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+  FetchContent_MakeAvailable(libwebp)
+  set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_SAVED})
+  target_compile_definitions(trellis_core PRIVATE TRELLIS_HAVE_WEBP)
+  target_link_libraries(trellis_core PUBLIC webp)
+  message(STATUS "trellis.cpp: WebP texture encoding enabled")
+endif()
 if(TARGET ggml-cuda)
   target_compile_definitions(trellis_core PUBLIC TRELLIS_USE_CUDA)
   target_link_libraries(trellis_core PUBLIC ggml-cuda)
@@ -149,6 +180,10 @@ set_target_properties(trellis-cli PROPERTIES BUILD_RPATH "${GGML_RPATH}")
 
 # Resident HTTP server (keeps the process warm; wraps trellis_run).
 find_package(Threads REQUIRED)
+add_executable(post-replay src/post_replay.cpp)
+target_link_libraries(post-replay PRIVATE trellis_core Threads::Threads)
+set_target_properties(post-replay PROPERTIES BUILD_RPATH "${GGML_RPATH}")
+
 add_executable(trellis-server src/trellis-server.cpp src/trellis_cli.cpp src/trellis_args.cpp)
 target_include_directories(trellis-server PRIVATE ${CMAKE_SOURCE_DIR}/thirdparty/cpp-httplib)
 target_link_libraries(trellis-server PRIVATE trellis_core Threads::Threads)

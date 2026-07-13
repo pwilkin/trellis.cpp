@@ -80,19 +80,23 @@ static T* sdpa(ggml_context* c, T* q, T* k, T* v, int d_model, T* mask = nullptr
     // (--no-fa forces the original soft_max path, for A/B + fallback.)
     const bool no_fa = g_no_fa;
     if (!no_fa) {
+        // TRELLIS_FA_FAST=1: F16 K/V + default (F16) accumulation — the shapes
+        // the Vulkan coopmat FA shaders are specialized for. A/B only: F16 K/V
+        // can overflow on HR activations (the reason BF16+F32 is the default).
+        static const bool fa_fast = std::getenv("TRELLIS_FA_FAST") != nullptr;
         const int64_t KQ_STRIDE = 256;
         auto prep_kv = [&](T* x) {                              // -> [hd, Lk_pad, nh] BF16
             T* p = ggml_cont(c, ggml_permute(c, x, 0, 2, 1, 3));   // [hd, Lk, nh] F32
             const int64_t pad = (KQ_STRIDE - (p->ne[1] % KQ_STRIDE)) % KQ_STRIDE;
             if (pad) p = ggml_pad(c, p, 0, (int)pad, 0, 0);        // zero-pad key dim
-            return ggml_cast(c, p, GGML_TYPE_BF16);
+            return ggml_cast(c, p, fa_fast ? GGML_TYPE_F16 : GGML_TYPE_BF16);
         };
         T* qf = ggml_cont(c, ggml_permute(c, q, 0, 2, 1, 3));  // [hd, Lq, nh]
         if (qf->type != GGML_TYPE_F32) qf = ggml_cast(c, qf, GGML_TYPE_F32);
         T* kf = prep_kv(k);
         T* vf = prep_kv(v);
         T* out = ggml_flash_attn_ext(c, qf, kf, vf, mask, scale, 0.0f, 0.0f);  // [hd, nh, Lq]
-        ggml_flash_attn_ext_set_prec(out, GGML_PREC_F32);
+        if (!fa_fast) ggml_flash_attn_ext_set_prec(out, GGML_PREC_F32);
         return ggml_reshape_2d(c, out, d_model, out->ne[2]);   // [d_model, Lq]
     }
     T* q2 = ggml_cont(c, ggml_permute(c, q, 0, 2, 1, 3));       // [hd, Lq, nh]

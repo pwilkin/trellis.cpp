@@ -53,18 +53,26 @@ last key-tile at the HR token count, ≈53k). BiRefNet bg-removal is done (M2); 
 ## M5 — Stage ③ Texture + finish
 - ☑ SLatFlowModel imgshape2tex forward + sampling → texture latent (concat shape slat)
 - ☑ Sparse U-Net tex decoder → 6-ch PBR per voxel (replays shape decoder's subdiv masks)
-- ☑ Bake PBR onto mesh: decimate (vertex cluster) → UV unwrap → atlas raster + seam dilation →
-      textured GLB (PBR baseColor + metallicRoughness, embedded PNG). Default unwrap is the O(F)
-      6-way box projection (seconds); `TRELLIS_XATLAS=1` uses xatlas (tighter packing, ~superlinear
-      in faces and only ~2-core even multithreaded, so much slower)
+- ☑ Bake PBR onto mesh — reference-parity postprocess (spec 27/28): weld → fill →
+      **narrow-band UDF dual-contouring remesh** → quadric simplify (meshopt) → bottom-up
+      normal-cone cluster merge (cumesh port) → stock xatlas per cluster, auto-resolution pack,
+      UVs normalized to the full atlas → trilinear voxel-PBR texel shading with BVH surface snap →
+      Telea inpaint → GLB with smooth normals + lossy-WebP textures (`EXT_texture_webp`).
+      `--box-uv` keeps the O(F) 6-way box projection as the fast path
 - ☑ 512→1024 cascade (LR flow_512 → upsample → quantize res64 → HR flow_1024 → decode res1024);
       needed the FlashAttention + padded-K/V fix (M1) to fit VRAM and keep the HR flow finite
 
 ## M6 — Productionize
 - ☑ `trellis-cli <image.png> <out.glb> [gpu] [models_dir] [seed]` driver (per-stage model load/free)
 - ☑ Multi-GPU placement (3080 + 5060 Ti via gpu arg), f16 default (TRELLIS_F32 for f32)
-- ◐ Docs + parity test suite (`trellis-test-*` binaries + `tools/ref_*.py`)
-- ☐ Polish: quadric (vs cluster) decimation, mesh fill_holes
+- ☑ Docs + parity test suite (`trellis-test-*` binaries + `tools/ref_*.py`; postprocess
+      validated against the reference CUDA `to_glb` run on identical dumped inputs — visual
+      parity + `tools/glb_metrics.py` at-or-above-parity texel density, spec 28 addenda)
+- ☑ Polish: quadric decimation, mesh fill_holes, degenerate-face-safe unwrap
+- ☑ Perf profile + backend comparison (spec 29): Vulkan fastest on Strix Halo; CUDA build
+      ~2.9x on discrete Blackwell; ROCm needs `GGML_CUDA_DISABLE_GRAPHS=1` and still trails
+- ☐ HR-token-count attention scaling (~45k tokens): ggml FA trails flash-attn-varlen ~1.4x
+      on same-GPU heavy inputs — upstream ggml or varlen-style path
 
 ## Validation strategy
 Full reference env needs CUDA-only extensions (o-voxel, flash-attn, spconv, nvdiffrast) that

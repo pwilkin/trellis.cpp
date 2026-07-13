@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script type="module" src="model-viewer.min.js"></script>
+<style>
+  body { margin: 0; background: #1e1e1e; }
+  model-viewer { width: 960px; height: 960px; background: #1e1e1e; --poster-color: transparent; }
+</style>
+</head>
+<body>
+<model-viewer id="mv" camera-controls shadow-intensity="1" exposure="1" interaction-prompt="none"></model-viewer>
+<script>
+  const params = new URLSearchParams(location.search);
+  const mv = document.getElementById('mv');
+  mv.src = params.get('src') || 'model.glb';
+  if (params.get('orbit')) mv.cameraOrbit = params.get('orbit');
+  window.mvReady = false;
+  mv.addEventListener('load', () => { window.mvReady = true; });
+  mv.addEventListener('error', (e) => { window.mvError = String(e.detail && e.detail.sourceError || e.type); });
+</script>
+</body>
+</html>

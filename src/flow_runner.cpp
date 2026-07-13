@@ -4,6 +4,7 @@
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
@@ -128,6 +129,8 @@ std::vector<float> sample_flow(const FlowFwd& fwd, std::vector<float> sample,
     std::vector<float> pos, neg, pred(Nst);
     static const bool dbg_step = std::getenv("TRELLIS_DBG_STEP") != nullptr;
     static const bool no_fix   = std::getenv("TRELLIS_NOFIX") != nullptr;  // robustness guards ON by default
+    const auto tflow0 = std::chrono::steady_clock::now();
+    int n_fwd = 0;
     auto fstats = [](const std::vector<float>& v, size_t& bad, double& mx) {
         bad = 0; mx = 0; for (float x : v) { if (!std::isfinite(x)) bad++; else if (std::fabs(x) > mx) mx = std::fabs(x); }
     };
@@ -137,11 +140,14 @@ std::vector<float> sample_flow(const FlowFwd& fwd, std::vector<float> sample,
         const float tscaled = 1000.0f * t;
         if (gs == 1.0f) {
             pred = fwd(sample, tscaled, cond);
+            ++n_fwd;
         } else if (gs == 0.0f) {
             pred = fwd(sample, tscaled, neg_cond);
+            ++n_fwd;
         } else {
             pos = fwd(sample, tscaled, cond);
             neg = fwd(sample, tscaled, neg_cond);
+            n_fwd += 2;
             for (size_t k = 0; k < Nst; ++k) pred[k] = gs * pos[k] + (1 - gs) * neg[k];
             if (sp.guidance_rescale > 0.0f) {
                 const float a = 1 - sm, b = sm + (1 - sm) * t;
@@ -170,6 +176,9 @@ std::vector<float> sample_flow(const FlowFwd& fwd, std::vector<float> sample,
             fprintf(stderr, "      [flow-step %2d] t=%.3f gs=%.1f  pred[nan=%zu max=%.3g]  sample[nan=%zu max=%.3g]\n", i, t, gs, pb, pm, sb, sm2); }
         if (trace) trace->push_back(sample);
     }
+    printf("      [flow] %d steps, %d forwards, %.1fs\n", sp.steps, n_fwd,
+           std::chrono::duration<double>(std::chrono::steady_clock::now() - tflow0).count());
+    fflush(stdout);
     return sample;
 }
 

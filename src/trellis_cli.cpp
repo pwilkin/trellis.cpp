@@ -10,6 +10,8 @@
 #include "dual_grid.h"
 #include "mesh_glb.h"
 #include "uv_bake.h"
+#include "tri_bvh.h"
+#include "remesh_dc.h"
 #include "stb_image_write.h"
 #include "trellis_run.h"
 
@@ -258,19 +260,58 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         // xatlas's ~superlinear chart-compute (grid 384 -> 382K faces took >9min pre-decimation),
         // occlusion-aware bucket assignment + depth-tested raster keep its bleed low.
         const bool boxuv = !cfg.xatlas;
-        const int T = cfg.tex >= 0 ? cfg.tex : (cascade ? 1536 : 1024);
-        // Cluster-decimate to the tri budget first either way (props rely on --decim for this);
-        // --decim 0 keeps the full res-1024 mesh (pair with a larger --atlas for detail).
-        const int dg = cfg.decim >= 0 ? cfg.decim : (cascade ? 256 : 192);
+        const int T = cfg.tex >= 0 ? cfg.tex : (cascade ? 2048 : 1024);
+        if (const char* dp = std::getenv("TRELLIS_DUMP_POST")) {
+            FILE* dfp = fopen(dp, "wb");
+            if (dfp) {
+                int dV = mesh.V(), dFc = mesh.F(), Mv = (int)so.coords.size(), res = so.res;
+                fwrite(&dV,4,1,dfp); fwrite(&dFc,4,1,dfp); fwrite(&Mv,4,1,dfp); fwrite(&res,4,1,dfp);
+                fwrite(mesh.verts.data(),4,(size_t)dV*3,dfp);
+                fwrite(mesh.faces.data(),4,(size_t)dFc*3,dfp);
+                for (auto& c : so.coords) { int xyz[3] = {c[0],c[1],c[2]}; fwrite(xyz,4,3,dfp); }
+                fwrite(pbr6.data(),4,(size_t)Mv*6,dfp);
+                fclose(dfp);
+                printf("      [dump] post-stage inputs -> %s\n", dp);
+            }
+        }
+        trellis::weld_vertices(mesh.verts, mesh.faces, colors.empty() ? nullptr : &colors,
+                               1.0f / ((float)so.res * 8.0f));
+        trellis::fill_small_holes(mesh.faces);
+        // Reference production pipeline: rebuild the noisy dual-grid mesh as
+        // the narrow-band offset shell (watertight manifold), then quadric
+        // simplify to the face target. The BVH over the original hole-filled
+        // mesh serves both the remesh UDF and the bake's texel snap.
+        trellis::TriBvh bvh = trellis::TriBvh::build(mesh.verts.data(), mesh.V(),
+                                                     mesh.faces.data(), mesh.F());
+        trellis::Mesh rm = trellis::remesh_narrow_band_dc(mesh.verts.data(), mesh.V(),
+                                                          mesh.faces.data(), mesh.F(),
+                                                          bvh, so.res);
+        const std::vector<float>& sverts = rm.F() > 0 ? rm.verts : mesh.verts;
+        const std::vector<int32_t>& sfaces = rm.F() > 0 ? rm.faces : mesh.faces;
         std::vector<float> dv, dp; std::vector<int32_t> df;
-        if (dg > 0) trellis::decimate_cluster(mesh.verts, mesh.V(), mesh.faces, mesh.F(), pbr6, dg, dv, df, dp);
-        else { dv = mesh.verts; df = mesh.faces; dp = pbr6; }
+        if (cfg.decim > 0) {
+            trellis::decimate_cluster(sverts, (int)sverts.size()/3, sfaces, (int)sfaces.size()/3, {}, cfg.decim, dv, df, dp);
+        } else if (cfg.decim == 0) {
+            dv = sverts; df = sfaces;
+        } else {
+            trellis::decimate_simplify(sverts, (int)sverts.size()/3, sfaces, (int)sfaces.size()/3,
+                                       cascade ? 300000 : 150000, dv, df);
+            trellis::weld_vertices(dv, df, nullptr, 1.0f / ((float)so.res * 8.0f));
+            trellis::fill_small_holes(df);
+        }
         const int dV = (int)dv.size()/3, dF = (int)df.size()/3;
-        trellis::BakedMesh bm = boxuv ? trellis::uv_box_project(dv, dV, df, dF, dp, T)
-                                      : trellis::uv_bake(dv, dV, df, dF, dp, T);
+        // Texels are shaded straight from the per-voxel PBR volume (trilinear sampling, the
+        // reference bake behavior) rather than from decimation-averaged vertex colors, so
+        // full material detail survives simplification.
+        trellis::VoxelPbr vox{&so.coords, &pbr6, so.res, &bvh};
+        const std::vector<float> no_vp;
+        trellis::BakedMesh bm = boxuv ? trellis::uv_box_project(dv, dV, df, dF, no_vp, T, &vox)
+                                      : trellis::uv_bake(dv, dV, df, dF, no_vp, T, &vox);
+        if (!boxuv && !bm.ok()) bm = trellis::uv_chart_project(dv, dV, df, dF, no_vp, T, &vox);
         if (bm.ok()) {
             trellis::write_glb_textured(outglb.c_str(), bm.verts.data(), (int64_t)bm.verts.size()/3, bm.uv.data(),
-                                        bm.faces.data(), (int64_t)bm.faces.size()/3, bm.base.data(), bm.mr.data(), bm.T);
+                                        bm.faces.data(), (int64_t)bm.faces.size()/3, bm.base.data(), bm.mr.data(), bm.T,
+                                        /*double_sided=*/rm.F() == 0);
             std::string tex = outglb.substr(0, outglb.find_last_of('.')) + "_base.png";
             stbi_write_png(tex.c_str(), bm.T, bm.T, 4, bm.base.data(), bm.T*4);
             textured = true;

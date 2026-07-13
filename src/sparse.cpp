@@ -4,6 +4,7 @@
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
 
+#include <algorithm>
 #include <unordered_map>
 #include <stdexcept>
 
@@ -35,6 +36,23 @@ std::vector<int32_t> build_neighbor_table(const std::vector<std::array<int,3>>& 
     return nbr;
 }
 
+// mul_mat with src1 row-chunked inside the graph: Vulkan packs matmul rows into
+// dispatch dim 1 (65535 workgroups; n-tile as small as 32 for few-output
+// pipelines -> ~2.1M-row ceiling), and dense res-1024 models exceed it.
+static T* mul_mat_rows(ggml_context* c, T* W, T* x) {
+    constexpr int64_t max_rows = 1000000;
+    const int64_t n = x->ne[1];
+    if (n <= max_rows) return ggml_mul_mat(c, W, x);
+    T* out = nullptr;
+    for (int64_t r0 = 0; r0 < n; r0 += max_rows) {
+        const int64_t nr = std::min(max_rows, n - r0);
+        T* xv = ggml_cont(c, ggml_view_2d(c, x, x->ne[0], nr, x->nb[1], (size_t)r0 * x->nb[1]));
+        T* o = ggml_mul_mat(c, W, xv);
+        out = out ? ggml_concat(c, out, o, 1) : o;
+    }
+    return out;
+}
+
 ggml_tensor* sparse_submconv(ggml_context* c, const Model& m, const std::string& prefix,
                              T* feats, T* nbr, int N) {
     T* W = w32(c, m.get(prefix + ".weight"));  // ggml ne [Ci,27,Co]
@@ -48,7 +66,7 @@ ggml_tensor* sparse_submconv(ggml_context* c, const Model& m, const std::string&
         T* idx = ggml_cont(c, ggml_view_1d(c, nbr, N, (size_t)t * N * ggml_element_size(nbr)));   // [N] i32
         T* g = ggml_get_rows(c, fz, idx);                          // [Ci, N]
         T* Wt = ggml_cont(c, ggml_view_2d(c, W, Ci, Co, W->nb[2], (size_t)t * W->nb[1])); // [Ci,Co]
-        T* o = ggml_mul_mat(c, Wt, g);                             // [Co, N]
+        T* o = mul_mat_rows(c, Wt, g);                             // [Co, N]
         acc = acc ? ggml_add(c, acc, o) : o;
     }
     return ggml_add(c, acc, ggml_reshape_2d(c, m.get(prefix + ".bias"), Co, 1));
@@ -59,9 +77,9 @@ ggml_tensor* sparse_convnext(ggml_context* c, const Model& m, const std::string&
     T* h = sparse_submconv(c, m, prefix + ".conv", feats, nbr, N);   // [C,N]
     h = ggml_norm(c, h, 1e-6f);                                       // rowLN over ne0=C
     h = ggml_add(c, ggml_mul(c, h, m.get(prefix + ".norm.weight")), m.get(prefix + ".norm.bias"));
-    h = ggml_add(c, ggml_mul_mat(c, m.get(prefix + ".mlp.0.weight"), h), m.get(prefix + ".mlp.0.bias"));
+    h = ggml_add(c, mul_mat_rows(c, m.get(prefix + ".mlp.0.weight"), h), m.get(prefix + ".mlp.0.bias"));
     h = ggml_silu(c, h);
-    h = ggml_add(c, ggml_mul_mat(c, m.get(prefix + ".mlp.2.weight"), h), m.get(prefix + ".mlp.2.bias"));
+    h = ggml_add(c, mul_mat_rows(c, m.get(prefix + ".mlp.2.weight"), h), m.get(prefix + ".mlp.2.bias"));
     return ggml_add(c, h, feats);                                     // residual on block input
 }
 
@@ -103,7 +121,7 @@ C2SResult sparse_c2s(const Model& m, const std::string& prefix,
         ggml_tensor* gn = ggml_new_tensor_2d(c, GGML_TYPE_I32, N, 27);  ggml_set_input(gn);
         ggml_tensor* sd = nullptr;
         if (!ext_subdiv)   // pred_subdiv: to_subdiv(feats)
-            sd = ggml_add(c, ggml_mul_mat(c, m.get(prefix + ".to_subdiv.weight"), gf), m.get(prefix + ".to_subdiv.bias"));
+            sd = ggml_add(c, mul_mat_rows(c, m.get(prefix + ".to_subdiv.weight"), gf), m.get(prefix + ".to_subdiv.bias"));
         ggml_tensor* h = ggml_norm(c, gf, 1e-6f);
         h = ggml_add(c, ggml_mul(c, h, m.get(prefix + ".norm1.weight")), m.get(prefix + ".norm1.bias"));
         h = ggml_silu(c, h);

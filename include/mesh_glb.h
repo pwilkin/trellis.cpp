@@ -10,11 +10,15 @@ namespace trellis {
 bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* faces, int64_t F,
                const float* colors = nullptr);
 
-// Textured GLB: POSITION + TEXCOORD_0 + indices, PBR material with embedded PNG base-color
-// and metallic-roughness textures. verts/faces/uv from uv_bake; base/mr are [T*T*4] RGBA.
+// Textured GLB: POSITION + NORMAL + TEXCOORD_0 + indices, PBR material with embedded
+// base-color and metallic-roughness textures (lossy WebP via EXT_texture_webp when built
+// with TRELLIS_WEBP, else PNG). verts/faces/uv from uv_bake; base/mr are [T*T*4] RGBA.
+// double_sided=false matches the reference's remeshed output (consistent orientation);
+// pass true for un-remeshed fallback paths where winding is not guaranteed.
 bool write_glb_textured(const char* path, const float* verts, int64_t V, const float* uv,
                         const int32_t* faces, int64_t F,
-                        const unsigned char* base_rgba, const unsigned char* mr_rgba, int T);
+                        const unsigned char* base_rgba, const unsigned char* mr_rgba, int T,
+                        bool double_sided = false);
 
 // Debug helper: binary little-endian PLY in raw TRELLIS space (no axis swap).
 // colors: optional [V*3] float RGB in [0,1] -> written as uchar red/green/blue per vertex.
