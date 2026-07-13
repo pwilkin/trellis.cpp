@@ -1,4 +1,5 @@
 #include "mesh_glb.h"
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cfloat>

@@ -2,6 +2,9 @@
 #include "tri_bvh.h"
 #include <algorithm>
 #include <atomic>
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
 #include <cmath>
 #include <cstdio>
 #include <functional>
@@ -12,6 +15,16 @@
 namespace trellis {
 
 namespace {
+
+inline int ctz64(uint64_t v) {
+#ifdef _MSC_VER
+    unsigned long i;
+    _BitScanForward64(&i, v);
+    return (int)i;
+#else
+    return __builtin_ctzll(v);
+#endif
+}
 
 inline uint64_t key3(int x, int y, int z) {
     return ((uint64_t)(uint32_t)x << 42) | ((uint64_t)(uint32_t)y << 21) | (uint32_t)z;
@@ -110,7 +123,7 @@ Mesh remesh_narrow_band_dc(const float* iverts, int64_t iV, const int32_t* iface
         for (int64_t w = 0; w < (int64_t)cand.size(); ++w) {
             uint64_t bits = cand[w];
             while (bits) {
-                const int b = __builtin_ctzll(bits);
+                const int b = ctz64(bits);
                 bits &= bits - 1;
                 cand_cells.push_back((w << 6) | b);
             }
