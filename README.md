@@ -86,11 +86,18 @@ DINOv3 ViT-L/16 feature extractor                [GGML]   → patch tokens [N,10
   │  → Sparse U-Net tex decoder (6-ch PBR per voxel)
   ▼
 textured mesh
-  │  weld → fill → narrow-band DC remesh → simplify → cluster + xatlas →
-  │  trilinear PBR bake (BVH snap) → Telea inpaint            [CPU, threaded]
+  │  weld → fill → narrow-band DC remesh → QEM edge-collapse decimate → cluster + xatlas →
+  │  trilinear PBR bake (BVH snap) → Telea inpaint    [decimate: CPU / CUDA / HIP / Vulkan]
   ▼
 UV-textured GLB (WebP PBR textures)
 ```
+
+The decimation is a faithful port of the reference's CuMesh QEM edge-collapse simplifier
+(Garland-Heckbert quadrics + a skinny-triangle shape metric + flip rejection + boundary
+weighting), replacing an off-the-shelf simplifier that produced a fragmented, non-adaptive
+mesh. The result matches the reference's adaptive triangulation — a single watertight
+component with reference-level surface smoothness. It runs on the GPU (CUDA, ROCm/HIP, or a
+Vulkan compute shader) behind one dispatch, with an automatic CPU fallback.
 
 All three flow stages use a `FlowEulerGuidanceIntervalSampler` (rectified-flow Euler,
 12 steps, classifier-free guidance with a guidance interval + rescale). Optional
@@ -138,8 +145,10 @@ Measured end-to-end (image → GLB, res 1024, 12-step flows, includes model load
 | light (goblin, 17k HR tokens) | 6:09 | **3:16** | 3:37 |
 | heavy (turret, ~45k HR tokens) | 12:39 | **7:23** | 5:20 |
 
-The CPU postprocess (weld → remesh → simplify → unwrap → bake → WebP) runs in
-~25 s for a 300k-face asset — at parity with the reference's CUDA postprocess.
+The postprocess (weld → remesh → decimate → unwrap → bake → WebP) uses the faithful
+CuMesh QEM decimation described above. With a GPU backend it decimates a 5.4M→300k-face
+mesh in ~5 s on ROCm (gfx1151) — ~18× the single-threaded CPU path — matching the
+reference's on-GPU decimation; the CPU fallback stays available for GPU-less builds.
 On Strix Halo, Vulkan is the fastest backend: ROCm requires
 `GGML_CUDA_DISABLE_GRAPHS=1` (ggml's HIP graph capture stalls on these graphs)
 and still trails Vulkan by 10–40 %.
