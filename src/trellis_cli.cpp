@@ -148,6 +148,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
     const float* cond_dec = cond.data();     // cond used by HR shape + tex flows
     const float* neg_dec  = neg.data();
     int Lc_dec = Lc;
+    vector<float> lr_norm, lr_dn;            // LR (res-512) shape slat @res32 — reused for the res-512 tex path
     if (cascade) {
         // Cascade target resolution: 1024 (default, '1024_cascade') or e.g. 1536 ('1536_cascade').
         // Both reuse the SAME shape_flow_1024 / tex_flow_1024 / cond_1024 — only the HR quantization
@@ -163,8 +164,8 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         const int max_tok   = cfg.max_tokens;
         printf("[4/7] shape SLAT flow (LR 512 -> upsample -> HR %d cascade, max_tok=%d)\n", hr_target, max_tok);
         // (1) LR shape flow @res32 with cond_512
-        vector<float> lr_norm = shape_flow(M + "/shape_flow_512.gguf", coords, cond.data(), neg.data(), Lc);
-        vector<float> lr_dn(lr_norm.size());
+        lr_norm = shape_flow(M + "/shape_flow_512.gguf", coords, cond.data(), neg.data(), Lc);
+        lr_dn.resize(lr_norm.size());
         for (size_t n = 0; n < coords.size(); ++n) for (int c = 0; c < 32; ++c)
             lr_dn[(size_t)c + 32*n] = lr_norm[(size_t)c + 32*n]*SHAPE_STD[c] + SHAPE_MEAN[c];
         slat_stats("LR slat (res32, decodes OK via upsample)", lr_dn);
@@ -227,38 +228,69 @@ int trellis_run(const trellis::TrellisParams& cfg) {
     printf("      mesh V=%d F=%d\n", mesh.V(), mesh.F());
 
     vector<float> colors, pbr6;   // colors = base RGB (PLY); pbr6 = per-vertex [V*6] for UV bake
+    trellis::ShapeOut so_tex;                                    // res-512 tex-guide decode (mixed-res path)
+    const vector<std::array<int,3>>* pbr_coords = &so.coords;    // coords/res the bake samples the PBR at
+    int pbr_res = so.res;
     if (do_tex) {
-        printf("[6/7] texture SLAT flow + PBR decode\n");
+        // Texture PBR resolution. A dense res-1024 decode paints its outermost voxel layer with a
+        // partial-coverage "skin" (dark/incoherent), and the bake, snapping the decimated mesh through
+        // that layer, samples it inconsistently -> salt-and-pepper / colour-patch speckle. (Verified on
+        // the reference decoder: it produces the same skin at res-1024.) The res-512 decode never
+        // resolves that layer, so its clean, coherent PBR baked onto the res-1024 mesh keeps the
+        // geometry detail without the speckle. Auto: drop to 512 above ~9M voxels; --tex-res forces it.
+        constexpr int DENSE_TEX = 9000000;
+        const int tex_res = cfg.tex_res > 0 ? cfg.tex_res
+                          : (cascade && (int)so.coords.size() > DENSE_TEX ? 512 : RES);
+        const bool mixed = cascade && tex_res != RES;   // res-1024 geometry + res-512 texture
+        printf("[6/7] texture SLAT flow + PBR decode%s\n", mixed ? "  (res-512 texture on res-1024 mesh)" : "");
+
+        if (mixed) {   // decode a res-512 shape (from the LR slat) to guide the res-512 tex decode
+            trellis::Model m = trellis::Model::load(M + "/shape_dec.gguf", gpu);
+            so_tex = trellis::shape_decode(m, lr_dn, coords, 512); m.free();
+            pbr_coords = &so_tex.coords; pbr_res = so_tex.res;
+            printf("      res-512 tex-guide decode: %d voxels\n", (int)so_tex.coords.size());
+        }
+        // tex flow + decode inputs: HR path (shc/slat_norm/cond_dec/so.subs) vs res-512 mixed path
+        // (coords/lr_norm/cond_512/so_tex.subs). The tex decoder upsamples via the guide subdivision.
+        const std::string tflow = M + (mixed ? "/tex_flow_512.gguf" : (cascade ? "/tex_flow_1024.gguf" : "/tex_flow_512.gguf"));
+        const vector<std::array<int,3>>& tcoords = mixed ? coords : shc;
+        const vector<float>& tslat = mixed ? lr_norm : slat_norm;
+        const float* tcond = mixed ? cond.data() : cond_dec;
+        const float* tneg  = mixed ? neg.data()  : neg_dec;
+        const int    tlc   = mixed ? Lc : Lc_dec;
+        const int    tN    = (int)tcoords.size();
+        const std::vector<std::vector<uint8_t>>& tsubs = mixed ? so_tex.subs : so.subs;
+
         vector<float> texlat;
         {
-            trellis::Model m = trellis::Model::load(M + (cascade ? "/tex_flow_1024.gguf" : "/tex_flow_512.gguf"), gpu);
+            trellis::Model m = trellis::Model::load(tflow, gpu);
             trellis::DiTParams p; p.in_ch = 64; p.out_ch = 32; p.d_cond = 1024; p.cast_f32 = F32;
-            trellis::DitRunner* run = trellis::make_sparse_runner(m, p, shc, Lc_dec);
+            trellis::DitRunner* run = trellis::make_sparse_runner(m, p, tcoords, tlc);
             // state is the 32-ch noise; each forward concat [noise(32) ; shape_slat_norm(32)] -> 64ch
             trellis::FlowFwd fwd = [&](const vector<float>& st, float ts, const float* c) {
-                vector<float> x64((size_t)64 * N);
-                for (int n = 0; n < N; ++n) {
+                vector<float> x64((size_t)64 * tN);
+                for (int n = 0; n < tN; ++n) {
                     for (int k = 0; k < 32; ++k) x64[(size_t)k + 64*n]      = st[(size_t)k + 32*n];
-                    for (int k = 0; k < 32; ++k) x64[(size_t)32 + k + 64*n] = slat_norm[(size_t)k + 32*n];
+                    for (int k = 0; k < 32; ++k) x64[(size_t)32 + k + 64*n] = tslat[(size_t)k + 32*n];
                 }
                 return run->forward(x64, ts, c);
             };
             trellis::SamplerParams sp; sp.steps=12; sp.guidance_strength=1.0f; sp.guidance_rescale=0.0f; sp.gi0=0.6f; sp.gi1=0.9f; sp.rescale_t=3.0f;
-            texlat = trellis::sample_flow(fwd, noise((size_t)32*N), cond_dec, neg_dec, sp);  // [32,N]
+            texlat = trellis::sample_flow(fwd, noise((size_t)32*tN), tcond, tneg, sp);  // [32,tN]
             delete run; m.free();
-            for (int n = 0; n < N; ++n) for (int c = 0; c < 32; ++c) texlat[(size_t)c + 32*n] = texlat[(size_t)c + 32*n]*TEX_STD[c] + TEX_MEAN[c];
+            for (int n = 0; n < tN; ++n) for (int c = 0; c < 32; ++c) texlat[(size_t)c + 32*n] = texlat[(size_t)c + 32*n]*TEX_STD[c] + TEX_MEAN[c];
         }
         {
             trellis::Model m = trellis::Model::load(M + "/tex_dec.gguf", gpu);
-            vector<float> pbr = trellis::tex_decode(m, texlat, shc, so.subs); m.free();   // [6,M] pre-scale
-            const int Mv = (int)so.coords.size();
+            vector<float> pbr = trellis::tex_decode(m, texlat, tcoords, tsubs); m.free();   // [6,Mv] pre-scale
+            const int Mv = (int)pbr_coords->size();
             colors.resize((size_t)Mv * 3); pbr6.resize((size_t)Mv * 6);
             auto cl = [](float v){ return v < 0 ? 0.f : (v > 1 ? 1.f : v); };
             for (int i = 0; i < Mv; ++i) {
                 for (int k = 0; k < 6; ++k) pbr6[(size_t)i*6 + k] = cl(pbr[(size_t)k + 6*i] * 0.5f + 0.5f);
                 for (int k = 0; k < 3; ++k) colors[(size_t)i*3 + k] = pbr6[(size_t)i*6 + k];
             }
-            printf("      PBR voxels=%d\n", Mv);
+            printf("      PBR voxels=%d @res%d\n", Mv, pbr_res);
         }
     }
 
@@ -273,12 +305,12 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         const int T = cfg.tex >= 0 ? cfg.tex : (cascade ? 2048 : 1024);
         if (const char* dp = std::getenv("TRELLIS_DUMP_POST")) {
             FILE* dfp = fopen(dp, "wb");
-            if (dfp) {
-                int dV = mesh.V(), dFc = mesh.F(), Mv = (int)so.coords.size(), res = so.res;
+            if (dfp) {   // geometry mesh + the PBR volume the bake samples (may be res-512 in mixed mode)
+                int dV = mesh.V(), dFc = mesh.F(), Mv = (int)pbr_coords->size(), res = pbr_res;
                 fwrite(&dV,4,1,dfp); fwrite(&dFc,4,1,dfp); fwrite(&Mv,4,1,dfp); fwrite(&res,4,1,dfp);
                 fwrite(mesh.verts.data(),4,(size_t)dV*3,dfp);
                 fwrite(mesh.faces.data(),4,(size_t)dFc*3,dfp);
-                for (auto& c : so.coords) { int xyz[3] = {c[0],c[1],c[2]}; fwrite(xyz,4,3,dfp); }
+                for (auto& c : *pbr_coords) { int xyz[3] = {c[0],c[1],c[2]}; fwrite(xyz,4,3,dfp); }
                 fwrite(pbr6.data(),4,(size_t)Mv*6,dfp);
                 fclose(dfp);
                 printf("      [dump] post-stage inputs -> %s\n", dp);
@@ -329,7 +361,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         // Texels are shaded straight from the per-voxel PBR volume (trilinear sampling, the
         // reference bake behavior) rather than from decimation-averaged vertex colors, so
         // full material detail survives simplification.
-        trellis::VoxelPbr vox{&so.coords, &pbr6, so.res, &bvh};
+        trellis::VoxelPbr vox{pbr_coords, &pbr6, pbr_res, &bvh};
         const std::vector<float> no_vp;
         trellis::BakedMesh bm = boxuv ? trellis::uv_box_project(dv, dV, df, dF, no_vp, T, &vox)
                                       : trellis::uv_bake(dv, dV, df, dF, no_vp, T, &vox);

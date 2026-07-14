@@ -33,6 +33,9 @@ struct TrellisParams {
     bool xatlas   = true;       // xatlas UV unwrap (else voxel-native box projection)
     int  decim    = -1;         // decimation cluster grid   (-1 => per-cascade default)
     int  tex      = -1;         // UV atlas size in px        (-1 => per-cascade default)
+    int  tex_res  = -1;         // texture PBR resolution: -1 => auto (drop dense res-1024 tex to
+                                //   512, whose clean coarse PBR bakes onto the res-1024 mesh
+                                //   without the partial-coverage "skin" speckle); else force 512/1024
     bool f32      = false;      // f32 sparse-conv compute
     bool no_fa    = false;      // disable FlashAttention (manual softmax)
     bool require_gpu = false;   // refuse CPU fallback if no GPU is usable
