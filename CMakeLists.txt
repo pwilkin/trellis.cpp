@@ -122,6 +122,24 @@ else()
       COMPILE_DEFINITIONS TRELLIS_DEFORM_VULKAN)
     set_source_files_properties(src/deform_conv_vk.cpp PROPERTIES
       COMPILE_DEFINITIONS "TRELLIS_DEFORM_SPV_HEADER=\"deform_conv_comp.h\"")
+    # Self-contained Vulkan QEM decimation: same four per-round compute kernels as the CUDA/HIP
+    # port, driven from the host (adjacency/edges/compaction). The shader needs 64-bit atomics
+    # (GL_EXT_shader_atomic_int64), so compile against vulkan1.2 like deform_conv.
+    set(DECIMATE_SPV_H ${CMAKE_CURRENT_BINARY_DIR}/decimate_qem_comp.h)
+    add_custom_command(
+      OUTPUT ${DECIMATE_SPV_H}
+      COMMAND ${Vulkan_GLSLC_EXECUTABLE} -O -mfmt=c --target-env=vulkan1.2
+              -o ${DECIMATE_SPV_H} ${CMAKE_CURRENT_SOURCE_DIR}/src/decimate_qem.comp
+      DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/decimate_qem.comp
+      COMMENT "glslc decimate_qem.comp -> SPIR-V (C array)")
+    add_custom_target(trellis_decimate_spv DEPENDS ${DECIMATE_SPV_H})
+    target_sources(trellis_core PRIVATE src/decimate_qem_vk.cpp)
+    add_dependencies(trellis_core trellis_decimate_spv)
+    # Target-level so the dispatch block in decimate_qem.cpp is active too (mirrors how the CUDA
+    # path defines TRELLIS_HAVE_GPU_DECIMATE for the whole library).
+    target_compile_definitions(trellis_core PRIVATE TRELLIS_HAVE_VK_DECIMATE)
+    set_source_files_properties(src/decimate_qem_vk.cpp PROPERTIES
+      COMPILE_DEFINITIONS "TRELLIS_DECIMATE_SPV_HEADER=\"decimate_qem_comp.h\"")
   endif()
 endif()
 if(TARGET ggml-vulkan)

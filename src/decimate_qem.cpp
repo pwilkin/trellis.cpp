@@ -25,6 +25,16 @@ bool decimate_qem_gpu(const std::vector<float>& verts, int V, const std::vector<
                       int target_faces, std::vector<float>& ov, std::vector<int32_t>& of);
 #endif
 
+// Self-contained Vulkan compute port (src/decimate_qem_vk.cpp). Runs the same four per-round
+// kernels (qem/cost/propagate/collapse) on a headless Vulkan device; the host builds CSR
+// adjacency/edges/boundary and does the stream compaction between rounds. Only present when a
+// Vulkan backend was compiled in; requires 64-bit shader atomics and falls through to the CPU
+// path below on false / failure (no device, missing atomics, alloc/submit error).
+#ifdef TRELLIS_HAVE_VK_DECIMATE
+bool decimate_qem_vk(const std::vector<float>& verts, int V, const std::vector<int32_t>& faces, int F,
+                     int target_faces, std::vector<float>& ov, std::vector<int32_t>& of);
+#endif
+
 namespace {
 
 struct QEM {
@@ -201,6 +211,12 @@ void decimate_qem(const std::vector<float>& in_verts, int V0, const std::vector<
     // Run the whole simplification on the GPU when a CUDA/HIP backend is built in; on any
     // failure (no device, alloc/kernel error) fall through to the validated CPU path.
     if (decimate_qem_gpu(in_verts, V0, in_faces, F0, target_faces, ov, of)) return;
+#endif
+
+#ifdef TRELLIS_HAVE_VK_DECIMATE
+    // Same, on a headless Vulkan compute device (used in Vulkan-only builds with no CUDA/HIP
+    // kernel). Falls through to the CPU path on any failure or when the device lacks 64-bit atomics.
+    if (decimate_qem_vk(in_verts, V0, in_faces, F0, target_faces, ov, of)) return;
 #endif
 
     float thresh = 1e-8f;
