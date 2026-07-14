@@ -12,7 +12,10 @@
 #include <chrono>
 #include <thread>
 #include <cstring>
+#include <cstdint>
 #include <functional>
+#include <unordered_map>
+#include <vector>
 #include <memory>
 #include <queue>
 #include <unordered_map>
@@ -308,6 +311,58 @@ int weld_vertices(std::vector<float>& verts, std::vector<int32_t>& faces, std::v
     return welded;
 }
 
+void clean_mesh(int V, std::vector<int32_t>& faces) {
+    (void)V;
+    // 1. drop degenerate faces (a repeated vertex -> zero area, blocks collapse)
+    {
+        std::vector<int32_t> kept; kept.reserve(faces.size());
+        for (size_t f = 0; f + 2 < faces.size(); f += 3) {
+            int a = faces[f], b = faces[f+1], c = faces[f+2];
+            if (a != b && b != c && a != c) { kept.push_back(a); kept.push_back(b); kept.push_back(c); }
+        }
+        faces.swap(kept);
+    }
+    const int F = (int)(faces.size() / 3);
+    if (F == 0) return;
+    // 2. undirected edge -> incident faces
+    std::unordered_map<uint64_t, std::vector<int>> ef;
+    ef.reserve((size_t)F * 3);
+    auto ek = [](int a, int b) -> uint64_t {
+        return ((uint64_t)(uint32_t)std::min(a, b) << 32) | (uint32_t)std::max(a, b);
+    };
+    for (int f = 0; f < F; ++f)
+        for (int j = 0; j < 3; ++j) ef[ek(faces[3*f+j], faces[3*f+(j+1)%3])].push_back(f);
+    // 3. BFS flood; flip faces to a consistent winding across manifold (exactly-2-face) edges.
+    // Non-manifold / boundary edges are not crossed, so orientation stays locally consistent.
+    std::vector<char> vis(F, 0), flip(F, 0);
+    std::vector<int> st;
+    for (int seed = 0; seed < F; ++seed) {
+        if (vis[seed]) continue;
+        vis[seed] = 1; st.push_back(seed);
+        while (!st.empty()) {
+            int f = st.back(); st.pop_back();
+            int v[3] = { faces[3*f], faces[3*f+1], faces[3*f+2] };
+            if (flip[f]) std::swap(v[1], v[2]);
+            for (int j = 0; j < 3; ++j) {
+                int a = v[j], b = v[(j+1)%3];
+                auto it = ef.find(ek(a, b));
+                if (it == ef.end() || it->second.size() != 2) continue;
+                int g = it->second[0] == f ? it->second[1] : it->second[0];
+                if (vis[g]) continue;
+                bool same = false;   // g traverses this edge the SAME way as f's corrected winding?
+                for (int k = 0; k < 3; ++k)
+                    if (faces[3*g+k] == a && faces[3*g+(k+1)%3] == b) { same = true; break; }
+                if (same) flip[g] = 1;   // consistent orientation needs the neighbour to go b->a
+                vis[g] = 1; st.push_back(g);
+            }
+        }
+    }
+    int nf = 0;
+    for (int f = 0; f < F; ++f) if (flip[f]) { std::swap(faces[3*f+1], faces[3*f+2]); ++nf; }
+    printf("    [clean] faces=%d, flipped %d for consistent winding\n", F, nf);
+    fflush(stdout);
+}
+
 void decimate_simplify(const std::vector<float>& verts, int V, const std::vector<int32_t>& faces, int F,
                        int target_faces, std::vector<float>& ov, std::vector<int32_t>& of) {
     // Progressive error ladder: a permissive one-shot error budget lets
@@ -396,6 +451,94 @@ void decimate_simplify(const std::vector<float>& verts, int V, const std::vector
     }
     printf("  simplify(target=%d): V %d->%d, F %d->%d (err %.4f)\n", target_faces, V, nv, F, (int)n/3, err);
     fflush(stdout);
+}
+
+// Drop connected components (shared-vertex face adjacency) whose face count is below
+// frac*(largest component's face count). Removes the decode floaters and spurious
+// ground-plane fragments that shatter our mesh into 50+ pieces while keeping legitimately
+// large secondary shells (e.g. a hollow vase's inner+outer surface, ~50% each). The
+// reference reconstruction is a single watertight component; these floaters are pure junk
+// that spawn extra UV charts and visible specks. Compacts verts/faces in place.
+int drop_small_components(std::vector<float>& verts, std::vector<int32_t>& faces, float frac) {
+    const int V = (int)verts.size() / 3;
+    const size_t F = faces.size() / 3;
+    if (V == 0 || F == 0) return 0;
+    std::vector<int> par((size_t)V);
+    for (int i = 0; i < V; ++i) par[i] = i;
+    auto find = [&](int x) { while (par[x] != x) { par[x] = par[par[x]]; x = par[x]; } return x; };
+    auto uni  = [&](int a, int b) { int ra = find(a), rb = find(b); if (ra != rb) par[ra] = rb; };
+    for (size_t f = 0; f < F; ++f) { uni(faces[3*f], faces[3*f+1]); uni(faces[3*f+1], faces[3*f+2]); }
+    std::unordered_map<int,int> fc;
+    for (size_t f = 0; f < F; ++f) fc[find(faces[3*f])]++;
+    int maxfc = 0;
+    for (auto& kv : fc) maxfc = std::max(maxfc, kv.second);
+    const int thresh = (int)(frac * maxfc);
+    int dropped = 0;
+    for (auto& kv : fc) if (kv.second < thresh) ++dropped;
+    if (dropped == 0) return 0;
+    std::vector<int32_t> kf; kf.reserve(faces.size());
+    for (size_t f = 0; f < F; ++f)
+        if (fc[find(faces[3*f])] >= thresh)
+            for (int k = 0; k < 3; ++k) kf.push_back(faces[3*f + k]);
+    std::vector<int> remap((size_t)V, -1);
+    std::vector<float> nv; nv.reserve(verts.size());
+    for (size_t i = 0; i < kf.size(); ++i) {
+        int v = kf[i];
+        if (remap[v] < 0) { remap[v] = (int)(nv.size() / 3); nv.insert(nv.end(), &verts[3*v], &verts[3*v] + 3); }
+        kf[i] = remap[v];
+    }
+    verts.swap(nv); faces.swap(kf);
+    return dropped;
+}
+
+// Taubin (lambda/mu) shrink-free Laplacian smoothing over the shared-vertex mesh. The
+// dual-contour surface carries ~1-voxel stair-step noise; a quadric simplifier sees that
+// as "curvature everywhere" and produces a uniform-dense sliver mesh instead of an
+// adaptive one. Low-passing it first (mu slightly stronger than lambda keeps volume) lets
+// the simplifier find real flats. Uniform umbrella weights; boundary verts pinned so open
+// holes don't shrink. In place.
+void taubin_smooth(std::vector<float>& verts, const std::vector<int32_t>& faces,
+                   int iters, float lambda, float mu) {
+    const int V = (int)verts.size() / 3;
+    const size_t F = faces.size() / 3;
+    if (V == 0 || F == 0 || iters <= 0) return;
+    // unique undirected edges + use-count (==1 => boundary)
+    std::unordered_map<uint64_t,int> euse;
+    euse.reserve(F * 3);
+    auto ekey = [](int a, int b) -> uint64_t { if (a > b) { int t = a; a = b; b = t; } return ((uint64_t)(uint32_t)a << 32) | (uint32_t)b; };
+    for (size_t f = 0; f < F; ++f) {
+        const int32_t* t = &faces[3*f];
+        for (int k = 0; k < 3; ++k) euse[ekey(t[k], t[(k+1)%3])]++;
+    }
+    // CSR adjacency (each edge contributes both directions) + boundary flags
+    std::vector<int> deg((size_t)V, 0);
+    std::vector<uint8_t> boundary((size_t)V, 0);
+    for (auto& kv : euse) {
+        int a = (int)(kv.first >> 32), b = (int)(kv.first & 0xffffffffu);
+        deg[a]++; deg[b]++;
+        if (kv.second == 1) { boundary[a] = boundary[b] = 1; }
+    }
+    std::vector<int> off((size_t)V + 1, 0);
+    for (int i = 0; i < V; ++i) off[i+1] = off[i] + deg[i];
+    std::vector<int> nbr((size_t)off[V]);
+    std::vector<int> cur(off.begin(), off.end() - 1);
+    for (auto& kv : euse) {
+        int a = (int)(kv.first >> 32), b = (int)(kv.first & 0xffffffffu);
+        nbr[cur[a]++] = b; nbr[cur[b]++] = a;
+    }
+    std::vector<float> tmp(verts.size());
+    auto step = [&](float w) {
+        for (int i = 0; i < V; ++i) {
+            const int s = off[i], e = off[i+1];
+            if (boundary[i] || e == s) { for (int k = 0; k < 3; ++k) tmp[3*i+k] = verts[3*i+k]; continue; }
+            float c[3] = {0, 0, 0};
+            for (int j = s; j < e; ++j) { const float* p = &verts[3*nbr[j]]; c[0]+=p[0]; c[1]+=p[1]; c[2]+=p[2]; }
+            const float inv = 1.0f / (float)(e - s);
+            for (int k = 0; k < 3; ++k) tmp[3*i+k] = verts[3*i+k] + w * (c[k]*inv - verts[3*i+k]);
+        }
+        verts.swap(tmp);
+    };
+    for (int it = 0; it < iters; ++it) { step(lambda); step(mu); }
 }
 
 int fill_small_holes(std::vector<int32_t>& faces, int max_loop) {

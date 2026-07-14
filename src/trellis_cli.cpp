@@ -286,6 +286,17 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         trellis::Mesh rm = trellis::remesh_narrow_band_dc(mesh.verts.data(), mesh.V(),
                                                           mesh.faces.data(), mesh.F(),
                                                           bvh, so.res);
+        // Clean the narrow-band DC output (drop degenerate faces, unify winding), then drop
+        // decode floaters (the reference is a single watertight component; ours shattered into
+        // 50+ pieces). The faithful QEM simplifier below handles surface smoothing via its
+        // quadric + skinny-triangle cost, so no Taubin pre-pass is needed (and none is applied,
+        // which keeps the mesh aligned to the voxel PBR volume for correct texture sampling).
+        if (rm.F() > 0) {
+            trellis::clean_mesh(rm.V(), rm.faces);
+            int ndrop = trellis::drop_small_components(rm.verts, rm.faces, 0.02f);
+            printf("  remesh postproc: dropped %d floater comps -> V=%d F=%d\n", ndrop, rm.V(), rm.F());
+            fflush(stdout);
+        }
         const std::vector<float>& sverts = rm.F() > 0 ? rm.verts : mesh.verts;
         const std::vector<int32_t>& sfaces = rm.F() > 0 ? rm.faces : mesh.faces;
         std::vector<float> dv, dp; std::vector<int32_t> df;
@@ -294,10 +305,15 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         } else if (cfg.decim == 0) {
             dv = sverts; df = sfaces;
         } else {
-            trellis::decimate_simplify(sverts, (int)sverts.size()/3, sfaces, (int)sfaces.size()/3,
-                                       cascade ? 300000 : 150000, dv, df);
+            trellis::decimate_qem(sverts, (int)sverts.size()/3, sfaces, (int)sfaces.size()/3,
+                                  cascade ? 300000 : 150000, dv, df);
             trellis::weld_vertices(dv, df, nullptr, 1.0f / ((float)so.res * 8.0f));
             trellis::fill_small_holes(df);
+            // Second component pass on the decimated mesh: a hallucinated ground plane
+            // survives the dense-mesh drop (it decimates to a large flat slab) but is a
+            // small fraction here and disconnected from the body. Ref is a single component.
+            int ndrop2 = trellis::drop_small_components(dv, df, 0.03f);
+            if (ndrop2) { printf("  decimated postproc: dropped %d more comps -> F=%d\n", ndrop2, (int)df.size()/3); fflush(stdout); }
         }
         const int dV = (int)dv.size()/3, dF = (int)df.size()/3;
         // Texels are shaded straight from the per-voxel PBR volume (trilinear sampling, the

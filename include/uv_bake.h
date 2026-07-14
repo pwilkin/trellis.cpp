@@ -46,6 +46,31 @@ void decimate_cluster(const std::vector<float>& verts, int V, const std::vector<
 void decimate_simplify(const std::vector<float>& verts, int V, const std::vector<int32_t>& faces, int F,
                        int target_faces, std::vector<float>& ov, std::vector<int32_t>& of);
 
+// Faithful CPU port of CuMesh's QEM edge-collapse simplifier (refs/CuMesh/src/simplify.cu):
+// Garland-Heckbert quadrics + a skinny-triangle shape penalty + flip rejection + boundary
+// weighting, driven by the reference threshold ladder. Produces the reference's adaptive,
+// low-sliver triangulation from a dense dual-contour mesh, unlike the meshopt/FQMS path.
+void decimate_qem(const std::vector<float>& verts, int V, const std::vector<int32_t>& faces, int F,
+                  int target_faces, std::vector<float>& ov, std::vector<int32_t>& of);
+
+// Drop connected components (shared-vertex face adjacency) whose face count is below
+// frac*(largest component's). Removes decode floaters + spurious ground fragments (which
+// shatter our mesh into 50+ pieces) while keeping legitimately large secondary shells
+// (a hollow vase's inner+outer surface). In place; returns the number of components dropped.
+int drop_small_components(std::vector<float>& verts, std::vector<int32_t>& faces, float frac = 0.02f);
+
+// Taubin (lambda/mu) shrink-free Laplacian smoothing. Strips the ~1-voxel stair-step noise
+// of the dual-contour surface so the quadric simplifier stays curvature-adaptive instead of
+// emitting a uniform-dense sliver mesh. Boundary verts pinned. In place.
+void taubin_smooth(std::vector<float>& verts, const std::vector<int32_t>& faces,
+                   int iters = 5, float lambda = 0.5f, float mu = -0.53f);
+
+// In-place cleanup of a welded surface mesh (faces only) so meshopt's guarded quadric collapse
+// reaches the target without the roughening FQMS fallback: drop degenerate/duplicate faces and
+// unify face orientations by BFS over manifold-edge adjacency. The narrow-band DC output is ~11%
+// inconsistently wound + non-manifold, which otherwise stalls meshopt and forces FQMS.
+void clean_mesh(int V, std::vector<int32_t>& faces);
+
 // Fan-fill boundary loops of at most max_loop edges in place; returns the number of holes filled.
 int fill_small_holes(std::vector<int32_t>& faces, int max_loop = 64);
 

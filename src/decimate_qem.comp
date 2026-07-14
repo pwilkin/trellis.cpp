@@ -1,0 +1,132 @@
+#version 450
+// GPU compute kernels for the CuMesh QEM edge-collapse simplifier, mirroring the validated
+// CPU port in decimate_qem.cpp. One shader module, four kernels selected by pc.kernel; the
+// host (decimate_qem_vk.cpp) builds CSR adjacency / edges / boundary and does stream
+// compaction between rounds, then dispatches these per-round:
+//   0 QEM       one invocation per vertex   -> qem[]
+//   1 COST      one invocation per edge     -> cost[], vnew[]
+//   2 PROPAGATE one invocation per edge     -> prop[] (64-bit atomicMin of packed cost|id)
+//   3 COLLAPSE  one invocation per edge     -> vdead[], fdead[], verts[] moved, faces[] retargeted
+// 64-bit atomics (GL_EXT_shader_atomic_int64) are required for the propagate min-reduce; the
+// host probes for the feature and falls back to the CPU path when unavailable.
+#extension GL_EXT_shader_atomic_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int kernel;
+    int V;
+    int F;
+    int E;
+    float lam_len;
+    float lam_skinny;
+    float thresh;
+} pc;
+
+layout(std430, binding = 0)          buffer Verts    { float verts[]; };     // V*3 (written by COLLAPSE)
+layout(std430, binding = 1)          buffer Faces    { int   faces[]; };     // F*3 (retargeted by COLLAPSE)
+layout(std430, binding = 2) readonly buffer Off      { int   off[]; };       // V+1  CSR offsets
+layout(std430, binding = 3) readonly buffer V2f      { int   v2f[]; };       // off[V] incident face ids
+layout(std430, binding = 4) readonly buffer Edges    { int   edges[]; };     // E*2 (e0,e1)
+layout(std430, binding = 5) readonly buffer Boundary { int   boundary[]; };  // V
+layout(std430, binding = 6)          buffer Qem      { float qem[]; };       // V*10
+layout(std430, binding = 7)          buffer Cost     { float cost[]; };      // E
+layout(std430, binding = 8)          buffer Vnew     { float vnew[]; };      // E*3
+layout(std430, binding = 9)          buffer Prop     { uint64_t prop[]; };   // F
+layout(std430, binding = 10)         buffer Vdead    { int   vdead[]; };     // V
+layout(std430, binding = 11)         buffer Fdead    { int   fdead[]; };     // F
+
+vec3 vget(int i) { return vec3(verts[3*i], verts[3*i+1], verts[3*i+2]); }
+
+// symmetric 4x4 quadric stored as upper triangle e[0..9]
+void qem_add_plane(inout float e[10], vec3 n, float d) {
+    e[0]+=n.x*n.x; e[1]+=n.x*n.y; e[2]+=n.x*n.z; e[3]+=n.x*d;
+    e[4]+=n.y*n.y; e[5]+=n.y*n.z; e[6]+=n.y*d;
+    e[7]+=n.z*n.z; e[8]+=n.z*d;   e[9]+=d*d;
+}
+float qem_eval(float e[10], vec3 p) {
+    return e[0]*p.x*p.x + 2.0*e[1]*p.x*p.y + 2.0*e[2]*p.x*p.z + 2.0*e[3]*p.x
+         + e[4]*p.y*p.y + 2.0*e[5]*p.y*p.z + 2.0*e[6]*p.y
+         + e[7]*p.z*p.z + 2.0*e[8]*p.z     + e[9];
+}
+
+uint64_t pack_cost(int id, float c) {
+    return (uint64_t(floatBitsToUint(c)) << 32) | uint64_t(uint(id));
+}
+
+// accumulate skinny shape metric over faces incident to `keep`; returns false on a flipped normal.
+bool process(int keep, int other, vec3 vn, inout float skinny, inout int ntri) {
+    for (int j = off[keep]; j < off[keep+1]; ++j) {
+        int f = v2f[j]; int x = faces[3*f], y = faces[3*f+1], z = faces[3*f+2];
+        if (x == other || y == other || z == other) continue;
+        vec3 a = vget(x), b = vget(y), c = vget(z);
+        vec3 na = (x==keep)?vn:a, nb = (y==keep)?vn:b, nc = (z==keep)?vn:c;
+        vec3 on = cross(b-a, c-a);
+        vec3 ne1 = nb-na, ne2 = nc-na, nn = cross(ne1, ne2);
+        if (dot(on, nn) < 0.0) return false;
+        float narea = 0.5 * length(nn);
+        float denom = dot(nc-nb, nc-nb) + dot(ne1, ne1) + dot(ne2, ne2);
+        denom = max(denom, 1e-12);
+        float sm = 4.0 * 1.7320508 * narea / denom;
+        skinny += 1.0 - clamp(sm, 0.0, 1.0);
+        ntri++;
+    }
+    return true;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+
+    if (pc.kernel == 0) {                     // QEM per vertex
+        int i = int(gid); if (i >= pc.V) return;
+        float e[10]; for (int k = 0; k < 10; ++k) e[k] = 0.0;
+        vec3 a = vget(i);
+        for (int j = off[i]; j < off[i+1]; ++j) {
+            int f = v2f[j];
+            vec3 fa = vget(faces[3*f]), fb = vget(faces[3*f+1]), fc = vget(faces[3*f+2]);
+            vec3 n = cross(fb-fa, fc-fa); float ln = length(n); if (ln > 1e-20) n /= ln;
+            qem_add_plane(e, n, -dot(n, fa));
+        }
+        for (int k = 0; k < 10; ++k) qem[10*i+k] = e[k];
+
+    } else if (pc.kernel == 1) {              // COST per edge
+        int t = int(gid); if (t >= pc.E) return;
+        int e0 = edges[2*t], e1 = edges[2*t+1];
+        vec3 v0 = vget(e0), v1 = vget(e1);
+        float w0 = 0.5;
+        if (boundary[e0] != 0 && boundary[e1] == 0) w0 = 1.0;
+        else if (boundary[e0] == 0 && boundary[e1] != 0) w0 = 0.0;
+        vec3 v = v0*w0 + v1*(1.0-w0);
+        vnew[3*t] = v.x; vnew[3*t+1] = v.y; vnew[3*t+2] = v.z;
+        float e[10]; for (int k = 0; k < 10; ++k) e[k] = qem[10*e0+k] + qem[10*e1+k];
+        float el2 = dot(v1-v0, v1-v0);
+        float c = qem_eval(e, v) + pc.lam_len * el2;
+        float skinny = 0.0; int ntri = 0;
+        bool ok = process(e0, e1, v, skinny, ntri) && process(e1, e0, v, skinny, ntri);
+        if (!ok) { cost[t] = 1.0 / 0.0; return; }
+        if (ntri > 0) skinny /= float(ntri);
+        cost[t] = c + pc.lam_skinny * skinny * el2;
+
+    } else if (pc.kernel == 2) {              // PROPAGATE per edge (64-bit atomicMin)
+        int t = int(gid); if (t >= pc.E) return;
+        uint64_t p = pack_cost(t, cost[t]);
+        int e0 = edges[2*t], e1 = edges[2*t+1];
+        for (int j = off[e0]; j < off[e0+1]; ++j) atomicMin(prop[v2f[j]], p);
+        for (int j = off[e1]; j < off[e1+1]; ++j) atomicMin(prop[v2f[j]], p);
+
+    } else {                                  // COLLAPSE per edge
+        int t = int(gid); if (t >= pc.E) return;
+        if (!(cost[t] <= pc.thresh)) return;
+        uint64_t p = pack_cost(t, cost[t]);
+        int e0 = edges[2*t], e1 = edges[2*t+1];
+        for (int j = off[e0]; j < off[e0+1]; ++j) if (prop[v2f[j]] != p) return;
+        for (int j = off[e1]; j < off[e1+1]; ++j) if (prop[v2f[j]] != p) return;
+        verts[3*e0] = vnew[3*t]; verts[3*e0+1] = vnew[3*t+1]; verts[3*e0+2] = vnew[3*t+2];
+        vdead[e1] = 1;
+        for (int j = off[e0]; j < off[e0+1]; ++j) { int f = v2f[j];
+            if (faces[3*f]==e1 || faces[3*f+1]==e1 || faces[3*f+2]==e1) fdead[f] = 1; }
+        for (int j = off[e1]; j < off[e1+1]; ++j) { int f = v2f[j];
+            for (int k = 0; k < 3; ++k) if (faces[3*f+k]==e1) faces[3*f+k] = e0; }
+    }
+}

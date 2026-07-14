@@ -36,14 +36,24 @@ static T* rms_gamma(ggml_context* c, T* x, T* gamma, float eps) {
 }
 
 // x: [head_dim, n_heads, L]; cos/sin: [1, head_dim/2, 1, L]. Interleaved-pair rotation.
+// The rotated pair [x_even*cos - x_odd*sin, x_odd*cos + x_even*sin] is scattered back into the
+// output with two ggml_set_rows (single flat-grid dispatch each) rather than ggml_concat: ggml's
+// concat launches one kernel per ne[3] slice, so the old concat over the [2,half,nh,L] pair tensor
+// fired L (token-count) dispatches per call -> ~30M concat launches over a flow. q/k are F32 here
+// (mul_mat output), which ggml_set_rows requires. Even/odd row indices come from ggml_arange.
 static T* apply_rope(ggml_context* c, T* x, T* cos, T* sin) {
     const int64_t hd = x->ne[0], nh = x->ne[1], L = x->ne[2];
     const int64_t half = hd / 2;
     T* x5 = ggml_reshape_4d(c, x, 2, half, nh, L);              // [2, half, nh, L]
-    T* x0 = ggml_cont(c, ggml_view_4d(c, x5, 1, half, nh, L, x5->nb[1], x5->nb[2], x5->nb[3], 0));
-    T* x1 = ggml_cont(c, ggml_view_4d(c, x5, 1, half, nh, L, x5->nb[1], x5->nb[2], x5->nb[3], x5->nb[0]));
-    T* r  = ggml_concat(c, ggml_scale(c, x1, -1.0f), x0, 0);    // [-x1, x0] along pair-elem
-    T* out = ggml_add(c, ggml_mul(c, x5, cos), ggml_mul(c, r, sin));
+    T* x0 = ggml_cont(c, ggml_view_4d(c, x5, 1, half, nh, L, x5->nb[1], x5->nb[2], x5->nb[3], 0));         // even
+    T* x1 = ggml_cont(c, ggml_view_4d(c, x5, 1, half, nh, L, x5->nb[1], x5->nb[2], x5->nb[3], x5->nb[0])); // odd
+    T* ev = ggml_sub(c, ggml_mul(c, x0, cos), ggml_mul(c, x1, sin));   // [1,half,nh,L] rotated even
+    T* od = ggml_add(c, ggml_mul(c, x1, cos), ggml_mul(c, x0, sin));   // [1,half,nh,L] rotated odd
+    T* ce = ggml_cast(c, ggml_arange(c, 0.0f, (float)hd, 2.0f), GGML_TYPE_I32);  // [0,2,..,hd-2]
+    T* co = ggml_cast(c, ggml_arange(c, 1.0f, (float)hd, 2.0f), GGML_TYPE_I32);  // [1,3,..,hd-1]
+    T* out = ggml_scale(c, ggml_reshape_4d(c, x, 1, hd, nh, L), 0.0f);  // allocated [1,hd,nh,L] scratch
+    out = ggml_set_rows(c, out, ev, ce);
+    out = ggml_set_rows(c, out, od, co);
     return ggml_reshape_3d(c, out, hd, nh, L);
 }
 

@@ -56,6 +56,7 @@ add_library(trellis_core STATIC
   thirdparty/meshoptimizer/simplifier.cpp
   src/tri_bvh.cpp
   src/remesh_dc.cpp
+  src/decimate_qem.cpp
 )
 target_include_directories(trellis_core PUBLIC include ${GGML_DIR}/include ${CMAKE_SOURCE_DIR}/thirdparty/stb ${CMAKE_SOURCE_DIR}/thirdparty/xatlas ${CMAKE_SOURCE_DIR}/thirdparty/meshoptimizer ${CMAKE_SOURCE_DIR}/thirdparty/fqms)
 target_link_libraries(trellis_core PUBLIC ggml ggml-base ggml-cpu)
@@ -91,6 +92,9 @@ if(TARGET ggml-cuda)
   target_compile_definitions(trellis_core PUBLIC TRELLIS_USE_CUDA)
   target_link_libraries(trellis_core PUBLIC ggml-cuda)
   target_sources(trellis_core PRIVATE src/deform_conv.cu)
+  # Self-contained CUDA QEM decimation (mirrors the CPU port; uses cub for scan/sort/RLE).
+  target_sources(trellis_core PRIVATE src/decimate_qem.cu)
+  target_compile_definitions(trellis_core PUBLIC TRELLIS_HAVE_GPU_DECIMATE)
   set_target_properties(trellis_core PROPERTIES CUDA_ARCHITECTURES "86;120" CUDA_RUNTIME_LIBRARY Shared)
   target_link_libraries(trellis_core PUBLIC CUDA::cudart)
   message(STATUS "trellis.cpp: CUDA backend enabled (${GGML_CUDA_LIB})")
@@ -126,13 +130,44 @@ if(TARGET ggml-vulkan)
 endif()
 if(TARGET ggml-hip)
   target_link_libraries(trellis_core PUBLIC ggml-hip)
-  message(STATUS "trellis.cpp: HIP/ROCm backend enabled")
+  # Compile the self-contained QEM decimation kernel as HIP (ggml enabled the HIP
+  # language via its subdirectory). hipcub headers live under the ROCm include root.
+  enable_language(HIP)
+  if(NOT DEFINED ROCM_PATH)
+    if(DEFINED ENV{ROCM_PATH})
+      set(ROCM_PATH $ENV{ROCM_PATH})
+    else()
+      set(ROCM_PATH /opt/rocm)
+    endif()
+  endif()
+  # Enabling HIP makes every target that links trellis_core (which now carries a HIP object)
+  # require HIP_ARCHITECTURES. Set the default globally so all subsequently-defined targets
+  # (the executables below) and trellis_core itself inherit the configured GPU target(s).
+  if(NOT CMAKE_HIP_ARCHITECTURES)
+    if(DEFINED GPU_TARGETS AND NOT "${GPU_TARGETS}" STREQUAL "")
+      set(CMAKE_HIP_ARCHITECTURES "${GPU_TARGETS}")
+    elseif(DEFINED AMDGPU_TARGETS AND NOT "${AMDGPU_TARGETS}" STREQUAL "")
+      set(CMAKE_HIP_ARCHITECTURES "${AMDGPU_TARGETS}")
+    else()
+      set(CMAKE_HIP_ARCHITECTURES "gfx1151")
+    endif()
+  endif()
+  set_source_files_properties(src/decimate_qem.cu PROPERTIES LANGUAGE HIP)
+  target_sources(trellis_core PRIVATE src/decimate_qem.cu)
+  target_compile_definitions(trellis_core PUBLIC TRELLIS_HAVE_GPU_DECIMATE)
+  target_include_directories(trellis_core PRIVATE ${ROCM_PATH}/include)
+  set_target_properties(trellis_core PROPERTIES HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}")
+  message(STATUS "trellis.cpp: HIP/ROCm backend enabled (GPU decimation via HIP, arch ${CMAKE_HIP_ARCHITECTURES})")
 endif()
 
 # --- executables -----------------------------------------------------------
 add_executable(trellis-smoke src/smoke_test.cpp)
 target_link_libraries(trellis-smoke PRIVATE trellis_core)
 set_target_properties(trellis-smoke PROPERTIES BUILD_RPATH "${GGML_RPATH}")
+
+add_executable(trellis-decode-replay src/decode_replay.cpp)
+target_link_libraries(trellis-decode-replay PRIVATE trellis_core)
+set_target_properties(trellis-decode-replay PROPERTIES BUILD_RPATH "${GGML_RPATH}")
 
 add_executable(trellis-test-ss-flow src/test_ss_flow.cpp)
 target_link_libraries(trellis-test-ss-flow PRIVATE trellis_core)
