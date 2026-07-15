@@ -99,20 +99,18 @@ static T* sdpa(ggml_context* c, T* q, T* k, T* v, int d_model, T* mask = nullptr
     //      remove the garbage tile, AND unlock the aligned (Lk%256==0) kernel path.
     //  (2) Use **BF16** (not F16) for K/V so HR activations can't overflow F16's +-65504 range;
     //      BF16 shares F32's exponent range and matches the reference's bf16 checkpoints.
-    // FA IS OFF BY DEFAULT: it corrupts the latent at HR token counts. On gfx1151 a
-    // [128, Lq, 12] x [128, Lk, 12] attention lands on ggml's TILE kernel, which -- unlike the
-    // WMMA one -- never reads ggml_flash_attn_ext_get_prec, so the set_prec(GGML_PREC_F32)
-    // below is a silent no-op, and under FAST_FP16_AVAILABLE (unconditional on HIP) it
-    // accumulates VKQ in half2. Golden tensors vs torch (trellis-test-shape-flow) measure the
-    // resulting bias growing with KV tile count: L=2048 -> -0.007, L=15006 -> -0.094, while the
-    // exact path stays at -0.002. End to end on the goblin that is the difference between a
-    // latent 120 sigma outside the reference's seed-to-seed spread and one inside it:
-    //   FA      tokens=15006 std=5.6794 mean=-0.8048   (ref n=5: std 5.2959+-0.0286,
-    //   exact   tokens=15071 std=5.3372 mean=-0.0565    mean -0.0353+-0.0064)
-    // and query chunking removed the memory argument for FA entirely: 4.5 GB vs 4.4 GB peak
-    // GTT, at 2.35x the time (939s vs 399s). TRELLIS_FA=1 re-enables it for A/B.
-    static const bool want_fa = std::getenv("TRELLIS_FA") != nullptr;
-    if (want_fa && !g_no_fa) {
+    // set_prec(GGML_PREC_F32) below is LOAD-BEARING, and only became so in ggml 2d6d0b0c.
+    // Before it, only fattn-wmma-f16.cu read ggml_flash_attn_ext_get_prec; TILE (what this
+    // shape gets on gfx1151), VEC and MMA silently ignored it and accumulated VKQ in half2.
+    // Summing ~15k weighted V terms in F16 stagnates -- small addends round away once the
+    // running sum is large -- biasing low, growing with KV tile count, and it wrecked the
+    // latent: mean -0.8048 vs the reference's -0.0353+-0.0064 (~120 sigma out, n=5 a side).
+    // With the fix TILE honours prec and the bias drops to -0.00235, matching the exact path.
+    // Do NOT assume a stock ggml has this: check with GGML_FA_DEBUG=1 (prints kernel + prec)
+    // and trellis-test-shape-flow, whose `output` mean-delta is the canary (-0.0024 good,
+    // -0.017 = prec is being ignored again). --no-fa falls back to the exact chunked path.
+    const bool no_fa = g_no_fa;
+    if (!no_fa) {
         // TRELLIS_FA_FAST=1: F16 K/V + default (F16) accumulation — the shapes
         // the Vulkan coopmat FA shaders are specialized for. A/B only: F16 K/V
         // can overflow on HR activations (the reason BF16+F32 is the default).
