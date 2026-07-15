@@ -22,7 +22,7 @@ struct TrellisParams {
     std::string host   = "127.0.0.1";                           // trellis-server only
     int      port = 8080;                                       // trellis-server only
     int      gpu  = 0;                                          // >=0 GPU index, <0 CPU
-    uint32_t seed = 42;
+    uint32_t seed = 0;
 
     bool cascade    = true;     // 1024 cascade (default); --res 512 selects the light path
     int  hr_res     = 1024;     // HR cascade target resolution (1024 / 1536)
