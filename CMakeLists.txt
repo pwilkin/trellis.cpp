@@ -195,6 +195,10 @@ add_executable(trellis-test-ss-flow src/test_ss_flow.cpp)
 target_link_libraries(trellis-test-ss-flow PRIVATE trellis_core)
 set_target_properties(trellis-test-ss-flow PROPERTIES BUILD_RPATH "${GGML_RPATH}")
 
+add_executable(trellis-test-shape-flow src/test_shape_flow.cpp)
+target_link_libraries(trellis-test-shape-flow PRIVATE trellis_core)
+set_target_properties(trellis-test-shape-flow PROPERTIES BUILD_RPATH "${GGML_RPATH}")
+
 add_executable(trellis-test-ss-sample src/test_ss_sample.cpp)
 target_link_libraries(trellis-test-ss-sample PRIVATE trellis_core)
 set_target_properties(trellis-test-ss-sample PROPERTIES BUILD_RPATH "${GGML_RPATH}")
