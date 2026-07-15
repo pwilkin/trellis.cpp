@@ -5,6 +5,7 @@
 #include "ggml-alloc.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <unordered_map>
 #include <stdexcept>
 
@@ -53,34 +54,82 @@ static T* mul_mat_rows(ggml_context* c, T* W, T* x) {
     return out;
 }
 
-ggml_tensor* sparse_submconv(ggml_context* c, const Model& m, const std::string& prefix,
-                             T* feats, T* nbr, int N) {
-    T* W = w32(c, m.get(prefix + ".weight"));  // ggml ne [Ci,27,Co]
+// Voxel range [r0, r0+nr) of the submanifold conv. The gather reads arbitrary rows of the
+// FULL input (a neighbour can be any voxel), so `feats` must stay whole -- but the OUTPUT
+// is per-voxel, so restricting it to a range needs no halo.
+static T* submconv_range(ggml_context* c, const Model& m, const std::string& prefix,
+                         T* fz, T* W, T* nbr, int N, int r0, int nr) {
     const int64_t Ci = W->ne[0], Co = W->ne[2];
-    T* zero = ggml_scale(c, ggml_view_2d(c, feats, Ci, 1, feats->nb[1], 0), 0.0f); // [Ci,1] zeros
-    T* fz = ggml_concat(c, feats, ggml_cont(c, zero), 1);          // [Ci, N+1]
     T* acc = nullptr;
     for (int t = 0; t < 27; ++t) {
         // cont() so idx is contiguous at buffer offset 0: the Vulkan get_rows
         // kernel asserts a zero index offset (CUDA tolerates the view offset).
-        T* idx = ggml_cont(c, ggml_view_1d(c, nbr, N, (size_t)t * N * ggml_element_size(nbr)));   // [N] i32
-        T* g = ggml_get_rows(c, fz, idx);                          // [Ci, N]
+        // nbr is tap-major [27, N], so tap t's slice for this range starts at t*N + r0.
+        T* idx = ggml_cont(c, ggml_view_1d(c, nbr, nr, ((size_t)t * N + r0) * ggml_element_size(nbr)));
+        T* g = ggml_get_rows(c, fz, idx);                          // [Ci, nr]
         T* Wt = ggml_cont(c, ggml_view_2d(c, W, Ci, Co, W->nb[2], (size_t)t * W->nb[1])); // [Ci,Co]
-        T* o = mul_mat_rows(c, Wt, g);                             // [Co, N]
+        T* o = mul_mat_rows(c, Wt, g);                             // [Co, nr]
         acc = acc ? ggml_add(c, acc, o) : o;
     }
     return ggml_add(c, acc, ggml_reshape_2d(c, m.get(prefix + ".bias"), Co, 1));
 }
 
+// Zero-padded input [Ci, N+1]: row N is the sentinel that absent neighbours index into.
+static T* submconv_pad(ggml_context* c, T* feats, int64_t Ci) {
+    T* zero = ggml_scale(c, ggml_view_2d(c, feats, Ci, 1, feats->nb[1], 0), 0.0f); // [Ci,1] zeros
+    return ggml_concat(c, feats, ggml_cont(c, zero), 1);                            // [Ci, N+1]
+}
+
+ggml_tensor* sparse_submconv(ggml_context* c, const Model& m, const std::string& prefix,
+                             T* feats, T* nbr, int N) {
+    T* W = w32(c, m.get(prefix + ".weight"));  // ggml ne [Ci,27,Co]
+    T* fz = submconv_pad(c, feats, W->ne[0]);
+    return submconv_range(c, m, prefix, fz, W, nbr, N, 0, N);
+}
+
+// Per-block peak is set by the ConvNeXt MLP, which widens to 4C: at res-1024 a stage-0
+// [4096, 400K] intermediate is 6.6 GB, and a couple are live at once (~15 GB measured) --
+// ~3x the reference's whole decode. Everything after the conv is per-voxel, so the block
+// is chunked over output voxels: only the [C,N] input/output stay whole, while the wide
+// intermediates are bounded to [4C, nr]. gallocr frees each chunk's temporaries at its
+// residual add, so the peak is one chunk, not the sum.
+static constexpr int64_t kBlockChunkBytes = 1500u * 1024 * 1024;   // budget per [4C, nr]
+
 ggml_tensor* sparse_convnext(ggml_context* c, const Model& m, const std::string& prefix,
                              T* feats, T* nbr, int N) {
-    T* h = sparse_submconv(c, m, prefix + ".conv", feats, nbr, N);   // [C,N]
-    h = ggml_norm(c, h, 1e-6f);                                       // rowLN over ne0=C
-    h = ggml_add(c, ggml_mul(c, h, m.get(prefix + ".norm.weight")), m.get(prefix + ".norm.bias"));
-    h = ggml_add(c, mul_mat_rows(c, m.get(prefix + ".mlp.0.weight"), h), m.get(prefix + ".mlp.0.bias"));
-    h = ggml_silu(c, h);
-    h = ggml_add(c, mul_mat_rows(c, m.get(prefix + ".mlp.2.weight"), h), m.get(prefix + ".mlp.2.bias"));
-    return ggml_add(c, h, feats);                                     // residual on block input
+    T* Wc = w32(c, m.get(prefix + ".conv.weight"));
+    const int64_t C = Wc->ne[2];
+    T* fz = submconv_pad(c, feats, Wc->ne[0]);          // built once, shared by every chunk
+
+    const int64_t per_vox = 4 * C * 4;                  // widest intermediate, bytes/voxel
+    int64_t budget = kBlockChunkBytes;
+    if (const char* e = getenv("TRELLIS_BLOCK_CHUNK_MB")) budget = atoll(e) * 1024 * 1024;  // A/B override
+    int64_t chunk = std::max<int64_t>(1, budget / std::max<int64_t>(per_vox, 1));
+    // Floor on the chunk size: every chunk adds ~145 graph nodes and decode_unet builds a
+    // whole stage (up to 16 blocks) as ONE graph, so an unbounded chunk count exhausts the
+    // ggml context -> GGML_ASSERT(obj_new). 24 chunks x 16 blocks x ~145 stays under the
+    // 65536-node budget. Hitting this cap just means bigger chunks (more memory), not a crash.
+    constexpr int64_t kMaxChunksPerBlock = 24;
+    if (chunk * kMaxChunksPerBlock < N) chunk = (N + kMaxChunksPerBlock - 1) / kMaxChunksPerBlock;
+    if (chunk >= N) chunk = N;                          // small stages: single chunk, no concat
+
+    T* out = nullptr;
+    for (int64_t r0 = 0; r0 < N; r0 += chunk) {
+        const int nr = (int)std::min<int64_t>(chunk, N - r0);
+        T* h = submconv_range(c, m, prefix + ".conv", fz, Wc, nbr, N, (int)r0, nr);   // [C,nr]
+        h = ggml_norm(c, h, 1e-6f);                                                   // rowLN over ne0=C
+        h = ggml_add(c, ggml_mul(c, h, m.get(prefix + ".norm.weight")), m.get(prefix + ".norm.bias"));
+        h = ggml_add(c, mul_mat_rows(c, m.get(prefix + ".mlp.0.weight"), h), m.get(prefix + ".mlp.0.bias"));
+        h = ggml_silu(c, h);
+        h = ggml_add(c, mul_mat_rows(c, m.get(prefix + ".mlp.2.weight"), h), m.get(prefix + ".mlp.2.bias"));
+        // residual on this range of the block input
+        T* fr = (r0 == 0 && nr == N)
+                    ? feats
+                    : ggml_cont(c, ggml_view_2d(c, feats, C, nr, feats->nb[1], (size_t)r0 * feats->nb[1]));
+        h = ggml_add(c, h, fr);
+        out = out ? ggml_concat(c, out, h, 1) : h;
+    }
+    return out;
 }
 
 // Run a graph with given inputs (name->host data), return one named output to host.

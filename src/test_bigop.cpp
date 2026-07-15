@@ -109,7 +109,10 @@ int main(int argc, char** argv) {
         T* gn = ggml_new_tensor_2d(c, GGML_TYPE_I32, Nr, 27); ggml_set_input(gn);
         T* y = (op == "submconv") ? trellis::sparse_submconv(c, m, "blocks.0.0.conv", gf, gn, Nr)
                                   : trellis::sparse_convnext(c, m, "blocks.0.0", gf, gn, Nr);
+        printf("  out shape = [%lld, %lld]  (expect [%d, %d])\n",
+               (long long)y->ne[0], (long long)y->ne[1], C, Nr);
         vector<float> r = run(m, c, y, { {gf, feats.data()}, {gn, nbr.data()} });
+        printf("  out elems = %zu (expect %zu)\n", r.size(), (size_t)C*Nr);
         printf("%s OK  Nr=%d out[0]=%.4f out[last]=%.4f\n", op.c_str(), Nr, r[0], r.back());
         ggml_free(c);
     } else if (op == "add4096" || op == "addbias4096") {
@@ -173,6 +176,8 @@ int main(int argc, char** argv) {
             T* gn = ggml_new_tensor_2d(c, GGML_TYPE_I32, Nr, 27); ggml_set_input(gn);
             T* x = gf;
             for (int j = 0; j < 4; ++j) x = trellis::sparse_convnext(c, m, "blocks.0." + std::to_string(j), x, gn, Nr);
+            printf("  out shape = [%lld, %lld]  (expect [%d, %d])\n",
+                   (long long)x->ne[0], (long long)x->ne[1], C, Nr);
             vector<float> r = run(m, c, x, { {gf, feats.data()}, {gn, nbr.data()} });
             printf("stage OK  Nr=%d out[0]=%.4f out[last]=%.4f\n", Nr, r[0], r.back());
             ggml_free(c);

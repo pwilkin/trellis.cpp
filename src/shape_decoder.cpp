@@ -12,11 +12,17 @@
 namespace trellis {
 using T = ggml_tensor;
 
+// A whole ConvNeXt stage (up to 16 blocks) is built as one graph, and each block is now
+// chunked over voxels (~145 nodes per chunk), so the node count scales with object density.
+// This is host-side metadata only (~350 B/tensor), so headroom is cheap -- running out
+// aborts in ggml_new_object, which is a much worse failure than a few MB of address space.
+static constexpr size_t kGraphNodes = 262144;
+
 // run a graph producing `out`, with the given input tensors set from host data
 static std::vector<float> run1(const Model& m, ggml_context* c, T* out,
                                std::vector<std::pair<T*, const void*>> ins) {
     ggml_set_output(out);
-    ggml_cgraph* g = ggml_new_graph_custom(c, 65536, false);
+    ggml_cgraph* g = ggml_new_graph_custom(c, kGraphNodes, false);
     ggml_build_forward_expand(g, out);
     ggml_gallocr_t a = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
     if (!ggml_gallocr_alloc_graph(a, g)) throw std::runtime_error("shape_dec alloc");
@@ -28,7 +34,7 @@ static std::vector<float> run1(const Model& m, ggml_context* c, T* out,
 }
 
 static ggml_context* mkctx() {
-    size_t meta = ggml_tensor_overhead() * 65536 + ggml_graph_overhead_custom(65536, false) + (1 << 20);
+    size_t meta = ggml_tensor_overhead() * kGraphNodes + ggml_graph_overhead_custom(kGraphNodes, false) + (1 << 20);
     return ggml_init({ meta, nullptr, true });
 }
 
