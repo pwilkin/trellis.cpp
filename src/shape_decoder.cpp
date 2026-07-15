@@ -18,6 +18,18 @@ using T = ggml_tensor;
 // aborts in ggml_new_object, which is a much worse failure than a few MB of address space.
 static constexpr size_t kGraphNodes = 262144;
 
+// Live GTT (whole-device, so it shows anything the driver has NOT handed back) and this
+// process's RSS. Probed either side of every graph: if GTT does not drop back after a
+// gallocr_free, memory is being retained between stages rather than merely used by one.
+void mem_probe(const char* tag) {
+    if (!getenv("TRELLIS_DBG_MEM")) return;
+    long long gtt = 0, rss = 0;
+    if (FILE* f = fopen("/sys/class/drm/card1/device/mem_info_gtt_used", "r")) { if (fscanf(f, "%lld", &gtt) != 1) gtt = 0; fclose(f); }
+    if (FILE* f = fopen("/proc/self/statm", "r")) { long long tot; if (fscanf(f, "%lld %lld", &tot, &rss) != 2) rss = 0; fclose(f); }
+    fprintf(stderr, "      [mem] %-34s GTT=%6.2f GB  RSS=%6.2f GB\n",
+            tag, gtt / 1e9, rss * 4096.0 / 1e9);
+}
+
 // run a graph producing `out`, with the given input tensors set from host data
 static std::vector<float> run1(const Model& m, ggml_context* c, T* out,
                                std::vector<std::pair<T*, const void*>> ins) {
@@ -26,10 +38,15 @@ static std::vector<float> run1(const Model& m, ggml_context* c, T* out,
     ggml_build_forward_expand(g, out);
     ggml_gallocr_t a = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
     if (!ggml_gallocr_alloc_graph(a, g)) throw std::runtime_error("shape_dec alloc");
+    if (getenv("TRELLIS_DBG_ALLOC"))
+        fprintf(stderr, "      [stage-alloc] nodes=%d  gallocr buffer = %.2f GB\n",
+                ggml_graph_n_nodes(g), ggml_gallocr_get_buffer_size(a, 0) / 1e9);
     for (auto& [t, d] : ins) ggml_backend_tensor_set(t, d, 0, ggml_nbytes(t));
     if (ggml_backend_graph_compute(m.backend, g) != GGML_STATUS_SUCCESS) throw std::runtime_error("shape_dec compute");
+    mem_probe("run1 computed (pre-readback)");
     std::vector<float> r = tensor_to_f32(out);
     ggml_gallocr_free(a);
+    mem_probe("run1 freed (post-readback)");
     return r;
 }
 
@@ -74,6 +91,9 @@ static std::vector<float> decode_unet(const Model& m, const std::vector<float>& 
     for (int si = 0; si < 4; ++si) {
         const Stage& st = stages[si];
         std::vector<int32_t> nbr = build_neighbor_table(coords);
+        if (getenv("TRELLIS_DBG_MEM"))
+            fprintf(stderr, "    == stage %d: C=%d nblk=%d N=%d | host h=%.2f GB nbr=%.2f GB\n",
+                    si, st.C, st.nblk, N, (double)h.size() * 4 / 1e9, (double)nbr.size() * 4 / 1e9);
         {   // ConvNeXt stage
             ggml_context* c = mkctx();
             T* gh = ggml_new_tensor_2d(c, GGML_TYPE_F32, st.C, N); ggml_set_input(gh);
@@ -84,10 +104,12 @@ static std::vector<float> decode_unet(const Model& m, const std::vector<float>& 
             h = run1(m, c, x, { {gh, h.data()}, {gn, nbr.data()} });
             ggml_free(c);
         }
+        mem_probe("after ConvNeXt stage");
         const std::vector<uint8_t>* ext = guide_subs ? &(*guide_subs)[si] : nullptr;
         C2SResult r = sparse_c2s(m, std::string("blocks.") + st.s + "." + std::to_string(st.c2si), h, st.C, coords, st.Cout, ext);
         if (subs_out) subs_out->push_back(r.subdiv);
         h = std::move(r.feats); coords = std::move(r.coords); N = (int)coords.size();
+        mem_probe("after c2s");
     }
     if (coords_only) return {};   // cascade upsample: just need the grown coords
     // final LN(no affine) + output_layer -> [out_ch, M]

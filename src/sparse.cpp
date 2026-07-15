@@ -11,6 +11,7 @@
 
 namespace trellis {
 using T = ggml_tensor;
+void mem_probe(const char* tag);   // shape_decoder.cpp
 
 bool g_sparse_cast_f32 = false;   // cast f16 conv weights to f32 (precision check)
 static T* w32(ggml_context* c, T* w) {
@@ -40,8 +41,11 @@ std::vector<int32_t> build_neighbor_table(const std::vector<std::array<int,3>>& 
 // mul_mat with src1 row-chunked inside the graph: Vulkan packs matmul rows into
 // dispatch dim 1 (65535 workgroups; n-tile as small as 32 for few-output
 // pipelines -> ~2.1M-row ceiling), and dense res-1024 models exceed it.
+// Callers that already chunk their rows can stay under this and skip the concat chain.
+static constexpr int64_t kMulMatRowChunk = 1000000;
+
 static T* mul_mat_rows(ggml_context* c, T* W, T* x) {
-    constexpr int64_t max_rows = 1000000;
+    constexpr int64_t max_rows = kMulMatRowChunk;
     const int64_t n = x->ne[1];
     if (n <= max_rows) return ggml_mul_mat(c, W, x);
     T* out = nullptr;
@@ -145,9 +149,13 @@ struct GraphRun {
         c = ggml_init({ meta, nullptr, true });
     }
     ~GraphRun() { if (alloc) ggml_gallocr_free(alloc); ggml_free(c); }
-    std::vector<float> run(ggml_tensor* out, const std::vector<std::pair<ggml_tensor*, const void*>>& inputs) {
+    // `roots` are extra nodes to expand: writes into a preallocated `out` via ggml_cpy are
+    // not reachable from `out` itself (nothing produces it), so they must be rooted explicitly.
+    std::vector<float> run(ggml_tensor* out, const std::vector<std::pair<ggml_tensor*, const void*>>& inputs,
+                           const std::vector<ggml_tensor*>& roots = {}) {
         ggml_set_output(out);
         ggml_cgraph* g = ggml_new_graph_custom(c, kGraphNodes, false);
+        for (ggml_tensor* r : roots) ggml_build_forward_expand(g, r);
         ggml_build_forward_expand(g, out);
         alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m.backend));
         if (!ggml_gallocr_alloc_graph(alloc, g)) throw std::runtime_error("c2s: alloc failed");
@@ -214,6 +222,10 @@ C2SResult sparse_c2s(const Model& m, const std::string& prefix,
     mstart[N] = (int32_t)gidx.size();
     const int M = (int)nc.size();
     std::vector<int32_t> nnbr = build_neighbor_table(nc);
+    if (getenv("TRELLIS_DBG_MEM"))
+        fprintf(stderr, "      [c2s] %-22s N=%d -> M=%d | host nnbr=%.2f GB feats_in=%.2f GB out=%.2f GB\n",
+                prefix.c_str(), N, M, (double)nnbr.size() * 4 / 1e9,
+                (double)feats_in.size() * 4 / 1e9, (double)Cout * M * 4 / 1e9);
 
     // conv1 widens to Cout*8, so the whole [Cout*8, N] is the stage's largest tensor (2.5 GB at
     // res-1024 stage 3). Materialising it whole and gathering afterwards keeps it live next to
@@ -252,9 +264,21 @@ C2SResult sparse_c2s(const Model& m, const std::string& prefix,
     // channels (o*Cout .. o*Cout+Cout), at offset k + Cout*(o + 8*i) -- is exactly column
     // (o + 8*i) of the free [Cout, 8*nr] reshape. The subdivision is then just a gather of the
     // surviving columns: no host copy, no re-upload.
+    // Chunks are written into ONE [Cout, M+1] buffer rather than concat-chained: every
+    // ggml_concat allocates a new full-size tensor beside the old one, so a chain peaks at
+    // ~2x its result -- 16.7 GB for the cottage's [64, 32.7M]. ggml_pad seeds the buffer from
+    // chunk 0 and zero-fills the rest, so column M -- conv2's sentinel row, which absent
+    // neighbours index -- is already zero; norm2/silu map an all-zero column to zero
+    // (norm is (0-0)/sqrt(0+eps)=0, silu(0)=0), so it survives and submconv_pad's extra full
+    // copy of hn is gone too.
+    // ggml_cpy, not ggml_set_2d_inplace: SET keeps its byte offset in int32 op_params and
+    // asserts offset < 1<<30, which these multi-GB tensors blow past. A view carries a 64-bit
+    // pointer instead. Nothing reads the writes, so they are rooted explicitly via run()'s
+    // `roots`, expanded ahead of the consumers that follow them in the node array.
     T* W1 = w32(c, m.get(prefix + ".conv1.weight"));
     T* fz = submconv_pad(c, h, W1->ne[0]);          // built once, shared by every chunk
-    T* hn = nullptr;
+    std::vector<T*> roots;
+    T* hraw = nullptr;
     for (int64_t r0 = 0; r0 < N; r0 += chunk) {
         const int64_t r1 = std::min<int64_t>(r0 + chunk, N);
         const int32_t m0 = mstart[r0], m1 = mstart[r1];
@@ -262,22 +286,52 @@ C2SResult sparse_c2s(const Model& m, const std::string& prefix,
         T* cvc = submconv_range(c, m, prefix + ".conv1", fz, W1, gn, N, (int)r0, (int)(r1 - r0));
         T* idx = ggml_cont(c, ggml_view_1d(c, gl, m1 - m0, (size_t)m0 * ggml_element_size(gl)));
         T* hc  = ggml_get_rows(c, ggml_reshape_2d(c, cvc, Cout, 8 * (r1 - r0)), idx);   // [Cout, m1-m0]
-        hn = hn ? ggml_concat(c, hn, hc, 1) : hc;
+        if (!hraw) { hraw = ggml_pad(c, hc, 0, (int)(M + 1 - (m1 - m0)), 0, 0); continue; }  // [Cout, M+1]
+        roots.push_back(ggml_cpy(c, hc, ggml_view_2d(c, hraw, Cout, m1 - m0,
+                                                     hraw->nb[1], (size_t)m0 * hraw->nb[1])));
+    }
+    T* hn = ggml_silu(c, ggml_norm(c, hraw, 1e-6f));                  // norm2, no affine
+
+    // conv2 runs at the POST-subdivision count M, which is where a dense object lives: the
+    // cottage hits M=32.7M, and unchunked each of the 27 taps builds full [Cout, M] gather /
+    // matmul / accumulator tensors, while mul_mat_rows' own 1M-row split concats 33 pieces
+    // into a chain that peaks near 2x the output. Chunking over OUTPUT voxels fixes both --
+    // the gather still reads the whole (padded) hn, since a neighbour can be any voxel, but
+    // the output is per-voxel so a range needs no halo. Keeping chunks <= mul_mat_rows'
+    // 1M-row threshold also stops it splitting internally, removing that concat chain.
+    // skip rides along per chunk: x channel2spatial'd by the same gather ([Cin,N] -> [K,M]),
+    // then repeat_interleave(R). [1,K,nr] -> repeat -> [R,K,nr] lays element (r,k,m) at
+    // r + R*k + R*K*m, so the [Cout,nr] reshape maps channel k*R+r -> k: interleave, not tile.
+    T* W2  = w32(c, m.get(prefix + ".conv2.weight"));
+    T* fz2 = hn;                                  // already [Cout, M+1]: pre-padded above
+    T* xs  = ggml_get_rows(c, ggml_reshape_2d(c, gf, K, (int64_t)8 * N), gi);     // [K, M]
+
+    const int64_t per_vox2 = 3 * (int64_t)Cout * 4;   // acc + gather + matmul, live per tap
+    int64_t chunk2 = std::max<int64_t>(1, budget / std::max<int64_t>(per_vox2, 1));
+    if (chunk2 > kMulMatRowChunk) chunk2 = kMulMatRowChunk;
+    constexpr int64_t kMaxChunks2 = 64;               // ~135 nodes/chunk, well under kGraphNodes
+    if (chunk2 * kMaxChunks2 < M) chunk2 = (M + kMaxChunks2 - 1) / kMaxChunks2;
+    if (chunk2 >= M) chunk2 = M;
+
+    T* out = nullptr;
+    for (int64_t m0 = 0; m0 < M; m0 += chunk2) {
+        const int64_t nr2 = std::min<int64_t>(chunk2, M - m0);
+        T* o = submconv_range(c, m, prefix + ".conv2", fz2, W2, gn2, M, (int)m0, (int)nr2);
+        T* xr = (m0 == 0 && nr2 == M) ? xs
+                : ggml_cont(c, ggml_view_2d(c, xs, K, nr2, xs->nb[1], (size_t)m0 * xs->nb[1]));
+        T* skr = ggml_repeat_4d(c, ggml_reshape_3d(c, xr, 1, K, nr2), R, K, nr2, 1);
+        o = ggml_add(c, o, ggml_reshape_2d(c, skr, Cout, nr2));
+        // written into one [Cout, M] buffer, as for hraw above -- a concat chain here would
+        // again peak at 2x the 8.4 GB output. Every column is covered by some chunk, so the
+        // pad's zero fill is overwritten and only sizes the buffer.
+        if (!out) { out = ggml_pad(c, o, 0, (int)(M - nr2), 0, 0); continue; }   // [Cout, M]
+        roots.push_back(ggml_cpy(c, o, ggml_view_2d(c, out, Cout, nr2,
+                                                    out->nb[1], (size_t)m0 * out->nb[1])));
     }
 
-    hn = ggml_silu(c, ggml_norm(c, hn, 1e-6f));                       // norm2, no affine
-    hn = sparse_submconv(c, m, prefix + ".conv2", hn, gn2, M);        // [Cout, M]
-
-    // skip: x is channel2spatial'd by the same gather ([Cin,N] -> [K,M]), then
-    // repeat_interleave(R) along the channel axis. [1,K,M] -> repeat -> [R,K,M] lays element
-    // (r,k,m) at r + R*k + R*K*m, so the [Cout,M] reshape maps channel k*R+r -> k: an
-    // interleave, not a tile.
-    T* xs = ggml_get_rows(c, ggml_reshape_2d(c, gf, K, (int64_t)8 * N), gi);      // [K, M]
-    T* sk = ggml_repeat_4d(c, ggml_reshape_3d(c, xs, 1, K, M), R, K, M, 1);
-    T* out = ggml_add(c, hn, ggml_reshape_2d(c, sk, Cout, M));
-
     std::vector<float> outv = gr2.run(out, { {gf, feats_in.data()}, {gn, nbr.data()},
-                                             {gi, gidx.data()}, {gl, gloc.data()}, {gn2, nnbr.data()} });
+                                             {gi, gidx.data()}, {gl, gloc.data()}, {gn2, nnbr.data()} },
+                                      roots);
     return { std::move(outv), std::move(nc), Cout, std::move(mask_used) };
 }
 
