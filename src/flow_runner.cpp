@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <stdexcept>
+#include <unistd.h>
 
 namespace trellis {
 
@@ -134,6 +135,25 @@ std::vector<float> sample_flow(const FlowFwd& fwd, std::vector<float> sample,
     auto fstats = [](const std::vector<float>& v, size_t& bad, double& mx) {
         bad = 0; mx = 0; for (float x : v) { if (!std::isfinite(x)) bad++; else if (std::fabs(x) > mx) mx = std::fabs(x); }
     };
+    // Progress. The 1024 cascade's HR pass is ~16 min of silence otherwise, which reads as
+    // a hang. On a TTY redraw one line; when redirected to a log, emit a line per step (12
+    // steps, so it stays readable). ETA from the mean step so far -- steps are near-uniform
+    // except where the guidance interval drops a forward, so it settles after step 2.
+    const bool tty = isatty(fileno(stdout));
+    auto progress = [&](int done) {
+        const double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - tflow0).count();
+        char bar[21];
+        const int fill = sp.steps ? done * 20 / sp.steps : 20;
+        for (int k = 0; k < 20; ++k) bar[k] = k < fill ? '#' : '.';
+        bar[20] = 0;
+        char eta[32];
+        if (done) snprintf(eta, sizeof eta, "~%.0fs left", el / done * (sp.steps - done));
+        else      snprintf(eta, sizeof eta, "starting");     // no rate yet -- don't invent an ETA
+        printf("%s      [flow] [%s] %2d/%d  %5.1fs  %-12s%s",
+               tty ? "\r" : "", bar, done, sp.steps, el, eta, tty ? "" : "\n");
+        fflush(stdout);
+    };
+    progress(0);
     for (int i = 0; i < sp.steps; ++i) {
         const float t = ts[i], tprev = ts[i + 1];
         const float gs = (sp.gi0 <= t && t <= sp.gi1) ? sp.guidance_strength : 1.0f;
@@ -172,10 +192,13 @@ std::vector<float> sample_flow(const FlowFwd& fwd, std::vector<float> sample,
         // whole latent on the next attention). A no-op when everything is finite.
         if (!no_fix) for (size_t k = 0; k < Nst; ++k) if (!std::isfinite(pred[k])) pred[k] = 0.0f;
         for (size_t k = 0; k < Nst; ++k) sample[k] -= (t - tprev) * pred[k];
+        progress(i + 1);
         if (dbg_step) { size_t pb, sb; double pm, sm2; fstats(pred, pb, pm); fstats(sample, sb, sm2);
+            if (tty) printf("\n");
             fprintf(stderr, "      [flow-step %2d] t=%.3f gs=%.1f  pred[nan=%zu max=%.3g]  sample[nan=%zu max=%.3g]\n", i, t, gs, pb, pm, sb, sm2); }
         if (trace) trace->push_back(sample);
     }
+    if (tty) printf("\n");
     printf("      [flow] %d steps, %d forwards, %.1fs\n", sp.steps, n_fwd,
            std::chrono::duration<double>(std::chrono::steady_clock::now() - tflow0).count());
     fflush(stdout);
