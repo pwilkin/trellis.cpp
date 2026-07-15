@@ -49,6 +49,16 @@ int trellis_run(const trellis::TrellisParams& cfg) {
     // Unbuffered, not line-buffered: MSVCRT treats _IOLBF as full buffering, which
     // swallows stage progress when piped (e.g. under Lemonade) if the process crashes.
     setvbuf(stdout, nullptr, _IONBF, 0);
+    uint32_t run_seed = cfg.seed;
+    if (run_seed == 0) {
+        std::random_device rd;
+        run_seed = (uint32_t(rd()) << 16) ^ uint32_t(rd()) ^
+                   uint32_t(std::chrono::high_resolution_clock::now().time_since_epoch().count());
+        if (run_seed == 0) run_seed = 1;
+        fprintf(stderr, "[trellis] generating model with seed %u (auto)\n", run_seed);
+    } else {
+        fprintf(stderr, "[trellis] generating model with seed %u\n", run_seed);
+    }
     // Publish the cross-module flags this run wants (modules read them with an env fallback).
     const bool F32 = cfg.f32; trellis::g_sparse_cast_f32 = F32;  // f16 default (rope bug was the real issue)
     trellis::g_no_fa = cfg.no_fa;
@@ -58,7 +68,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
     const std::string& M = cfg.models;
     const int gpu = cfg.gpu;
     const bool cascade = cfg.cascade;   // 1024 cascade is the TRELLIS default; --res 512 forces the light path
-    std::mt19937 rng(cfg.seed); std::normal_distribution<float> randn(0.f, 1.f);
+    std::mt19937 rng(run_seed); std::normal_distribution<float> randn(0.f, 1.f);
     auto noise = [&](size_t n){ vector<float> v(n); for (auto& x : v) x = randn(rng); return v; };
     double t0 = now();
 
