@@ -164,11 +164,24 @@ int main(int argc, char** argv) {
         vector<float> feats((size_t)C * Nr);
         for (size_t i = 0; i < feats.size(); ++i) feats[i] = ((i * 2654435761u) & 1023) / 512.0f - 1.0f;
         if (op == "c2s") {
-            // isolate graph1 (conv1 -> [Cout*8=4096, Nr] = the >2^31 tensor); minimal subdiv keeps graph2 trivial
+            // isolate graph1 (conv1 -> [Cout*8, Nr]); minimal subdiv keeps graph2 trivial.
+            // TRELLIS_C2S_STAGE picks the real decode stage: later stages are narrower but
+            // run at far larger N, which is where a dense object's decode actually lives.
+            //   stage: 0 blocks.0.4  1024->512 | 1 blocks.1.16 512->256
+            //          2 blocks.2.8   256->128 | 3 blocks.3.4  128->64
+            int stg = getenv("TRELLIS_C2S_STAGE") ? atoi(getenv("TRELLIS_C2S_STAGE")) : 0;
+            static const char* PFX[4] = {"blocks.0.4","blocks.1.16","blocks.2.8","blocks.3.4"};
+            static const int   CIN[4] = {1024, 512, 256, 128};
+            static const int   COUT[4]= { 512, 256, 128,  64};
             vector<uint8_t> ext((size_t)8 * Nr, 0);
             for (int o = 0; o < 8; ++o) ext[o] = 1;   // only voxel 0 subdivides -> M=8
-            trellis::C2SResult r = trellis::sparse_c2s(m, "blocks.0.4", feats, C, coords, 512, &ext);
-            printf("c2s OK  in Nr=%d -> out M=%zu Cout=512\n", Nr, r.coords.size());
+            vector<float> f2((size_t)CIN[stg] * Nr, 0.1f);
+            printf("  stage=%d %s  Cin=%d Cout=%d  conv1=[%d, %d] = %.1f GB\n",
+                   stg, PFX[stg], CIN[stg], COUT[stg], COUT[stg]*8, Nr,
+                   (double)COUT[stg]*8*Nr*4/1e9);
+            fflush(stdout);
+            trellis::C2SResult r = trellis::sparse_c2s(m, PFX[stg], f2, CIN[stg], coords, COUT[stg], &ext);
+            printf("c2s OK  in Nr=%d -> out M=%zu Cout=%d\n", Nr, r.coords.size(), COUT[stg]);
         } else {
             vector<int32_t> nbr = trellis::build_neighbor_table(coords);
             ggml_context* c = mkctx();
