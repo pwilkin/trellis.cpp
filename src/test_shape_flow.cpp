@@ -96,7 +96,9 @@ int main(int argc, char** argv) {
         }
     }
 
-    size_t meta = ggml_tensor_overhead() * 16384 + ggml_graph_overhead_custom(32768, false) + (1 << 20);
+    // Generous: chunked attention adds ~8 tensors per chunk per attention, and a 30-block DiT
+    // with 2 attentions each is one graph. Meta is host RAM for structs only (~370 B each).
+    size_t meta = ggml_tensor_overhead() * 131072 + ggml_graph_overhead_custom(262144, false) + (1 << 20);
     ggml_context* c = ggml_init({ meta, nullptr, true });
     ggml_tensor* gh0  = ggml_new_tensor_2d(c, GGML_TYPE_F32, Cin, L);         ggml_set_input(gh0);
     ggml_tensor* gtf  = ggml_new_tensor_1d(c, GGML_TYPE_F32, 256);            ggml_set_input(gtf);
@@ -107,7 +109,7 @@ int main(int argc, char** argv) {
     std::map<string, ggml_tensor*> inter;
     ggml_tensor* out = trellis::build_dit_dense(c, m, p, gh0, gtf, gcd, gcos, gsin, &inter);
 
-    ggml_cgraph* g = ggml_new_graph_custom(c, 32768, false);
+    ggml_cgraph* g = ggml_new_graph_custom(c, 262144, false);
     ggml_build_forward_expand(g, out);
     for (auto& [k, v] : inter) ggml_set_output(v);
 

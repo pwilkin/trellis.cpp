@@ -2,6 +2,7 @@
 #include "trellis_model.h"
 #include "ggml.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <string>
@@ -11,6 +12,10 @@ namespace trellis {
 using T = ggml_tensor;
 
 static bool g_cast_f32 = false;   // set per build_dit_dense call
+
+// Budget for one query chunk's [Lk, nq, nh] score tile in the exact (non-FA) SDPA path.
+// Bounds the peak regardless of Lq, which is what made FA necessary in the first place.
+static constexpr int64_t kAttnChunkBytes = 1024ll * 1024 * 1024;
 bool g_no_fa = false;             // --no-fa; set by trellis_run
 
 static T* lin(ggml_context* c, const Model& m, const std::string& p, T* x) {
@@ -68,7 +73,14 @@ static T* build_pad_mask(ggml_context* c, int64_t Lk_real, int64_t Lq) {
     T* sh = ggml_arange(c, 0.5f - (float)Lk_real, (float)Lk_pad - (float)Lk_real + 0.5f, 1.0f); // [Lk_pad]
     T* col = ggml_scale(c, ggml_step(c, sh), -30000.0f);            // 0 (keep) | -30000 (mask) per key
     T* colh = ggml_cast(c, ggml_reshape_2d(c, col, Lk_pad, 1), GGML_TYPE_F16);
-    return ggml_repeat(c, colh, ggml_new_tensor_2d(c, GGML_TYPE_F16, Lk_pad, Lq)); // [Lk_pad,Lq] F16, contig
+    // The QUERY dim must be padded to GGML_KQ_MASK_PAD too, not just the key dim: CUDA's
+    // flash_attn_mask_to_KV_max walks the mask in query tiles (mask += jt*ncols1*s31) to find
+    // which KV tiles a tile can skip, so an unpadded Lq makes the last tile read past the end.
+    // The garbage it finds there corrupts that tile's KV_max -> wrong keys survive the softmax.
+    // Every row here is identical (the mask depends only on key index), so the extra rows are free.
+    constexpr int64_t KQ_MASK_PAD = 64;   // llama.cpp's GGML_KQ_MASK_PAD; not exported by ggml
+    const int64_t Lq_pad = ((Lq + KQ_MASK_PAD - 1) / KQ_MASK_PAD) * KQ_MASK_PAD;
+    return ggml_repeat(c, colh, ggml_new_tensor_2d(c, GGML_TYPE_F16, Lk_pad, Lq_pad)); // [Lk_pad,Lq_pad] F16
 }
 
 // SDPA over heads. q:[hd,nh,Lq]  k,v:[hd,nh,Lk] -> [d_model, Lq].  `mask`: optional [Lk_pad,Lq] F16.
@@ -87,9 +99,20 @@ static T* sdpa(ggml_context* c, T* q, T* k, T* v, int d_model, T* mask = nullptr
     //      remove the garbage tile, AND unlock the aligned (Lk%256==0) kernel path.
     //  (2) Use **BF16** (not F16) for K/V so HR activations can't overflow F16's +-65504 range;
     //      BF16 shares F32's exponent range and matches the reference's bf16 checkpoints.
-    // (--no-fa forces the original soft_max path, for A/B + fallback.)
-    const bool no_fa = g_no_fa;
-    if (!no_fa) {
+    // FA IS OFF BY DEFAULT: it corrupts the latent at HR token counts. On gfx1151 a
+    // [128, Lq, 12] x [128, Lk, 12] attention lands on ggml's TILE kernel, which -- unlike the
+    // WMMA one -- never reads ggml_flash_attn_ext_get_prec, so the set_prec(GGML_PREC_F32)
+    // below is a silent no-op, and under FAST_FP16_AVAILABLE (unconditional on HIP) it
+    // accumulates VKQ in half2. Golden tensors vs torch (trellis-test-shape-flow) measure the
+    // resulting bias growing with KV tile count: L=2048 -> -0.007, L=15006 -> -0.094, while the
+    // exact path stays at -0.002. End to end on the goblin that is the difference between a
+    // latent 120 sigma outside the reference's seed-to-seed spread and one inside it:
+    //   FA      tokens=15006 std=5.6794 mean=-0.8048   (ref n=5: std 5.2959+-0.0286,
+    //   exact   tokens=15071 std=5.3372 mean=-0.0565    mean -0.0353+-0.0064)
+    // and query chunking removed the memory argument for FA entirely: 4.5 GB vs 4.4 GB peak
+    // GTT, at 2.35x the time (939s vs 399s). TRELLIS_FA=1 re-enables it for A/B.
+    static const bool want_fa = std::getenv("TRELLIS_FA") != nullptr;
+    if (want_fa && !g_no_fa) {
         // TRELLIS_FA_FAST=1: F16 K/V + default (F16) accumulation — the shapes
         // the Vulkan coopmat FA shaders are specialized for. A/B only: F16 K/V
         // can overflow on HR activations (the reason BF16+F32 is the default).
@@ -105,18 +128,51 @@ static T* sdpa(ggml_context* c, T* q, T* k, T* v, int d_model, T* mask = nullptr
         if (qf->type != GGML_TYPE_F32) qf = ggml_cast(c, qf, GGML_TYPE_F32);
         T* kf = prep_kv(k);
         T* vf = prep_kv(v);
-        T* out = ggml_flash_attn_ext(c, qf, kf, vf, mask, scale, 0.0f, 0.0f);  // [hd, nh, Lq]
+        // TRELLIS_FA_NOMASK=1: drop the mask. If the output is UNCHANGED, the mask is being
+        // ignored and the zero-padded keys are diluting the softmax (exp(0-rowmax) is only
+        // negligible when rowmax >> 0), which shrinks every output toward zero.
+        static const bool fa_nomask = std::getenv("TRELLIS_FA_NOMASK") != nullptr;
+        T* out = ggml_flash_attn_ext(c, qf, kf, vf, fa_nomask ? nullptr : mask, scale, 0.0f, 0.0f);  // [hd, nh, Lq]
         if (!fa_fast) ggml_flash_attn_ext_set_prec(out, GGML_PREC_F32);
         return ggml_reshape_2d(c, out, d_model, out->ne[2]);   // [d_model, Lq]
     }
+    // Exact SDPA, chunked over QUERIES. The whole reason FA exists here is the [Lk, Lq, nh]
+    // score matrix -- at the HR flow that is 15104*15006*12*4 = 10.9 TB, so it cannot be
+    // materialised whole. But attention is independent per query: a query range needs no halo
+    // (it reads all of K/V, which stay whole), so the scores can be built a slice at a time and
+    // the peak is [Lk, nq, nh] instead. K/V are the UNPADDED originals, so no pad mask is
+    // needed and none of FA's tile machinery is involved -- this is the path the golden-tensor
+    // test matches to 8e-5 on the output mean.
     T* q2 = ggml_cont(c, ggml_permute(c, q, 0, 2, 1, 3));       // [hd, Lq, nh]
     T* k2 = ggml_cont(c, ggml_permute(c, k, 0, 2, 1, 3));       // [hd, Lk, nh]
-    T* kq = ggml_mul_mat(c, k2, q2);                            // [Lk, Lq, nh]
-    kq = ggml_soft_max_ext(c, kq, nullptr, scale, 0.0f);
     T* v2 = ggml_cont(c, ggml_permute(c, v, 1, 2, 0, 3));       // [Lk, hd, nh]
-    T* kqv = ggml_mul_mat(c, v2, kq);                           // [hd, Lq, nh]
-    kqv = ggml_cont(c, ggml_permute(c, kqv, 0, 2, 1, 3));       // [hd, nh, Lq]
-    return ggml_reshape_2d(c, kqv, d_model, kqv->ne[2]);        // [d_model, Lq]
+    const int64_t hd = q2->ne[0], Lq = q2->ne[1], nh = q2->ne[2], Lk = k2->ne[1];
+
+    int64_t budget = kAttnChunkBytes;
+    if (const char* e = getenv("TRELLIS_ATTN_CHUNK_MB")) budget = atoll(e) * 1024 * 1024;
+    const int64_t per_q = Lk * nh * 4;                          // one query's score column
+    int64_t nq = std::max<int64_t>(1, budget / std::max<int64_t>(per_q, 1));
+    // Floor on the chunk size: each chunk adds ~8 nodes and a whole 30-block DiT with two
+    // attentions per block is built as ONE graph, so an unbounded chunk count exhausts the
+    // ggml context (ggml_new_object: not enough space). Hitting this cap costs memory, not
+    // correctness -- query chunking is bit-exact either way (no reduction crosses queries).
+    constexpr int64_t kMaxAttnChunks = 32;
+    if (nq * kMaxAttnChunks < Lq) nq = (Lq + kMaxAttnChunks - 1) / kMaxAttnChunks;
+    if (nq >= Lq) nq = Lq;                                      // small attn: single chunk, no concat
+
+    T* out = nullptr;
+    for (int64_t q0 = 0; q0 < Lq; q0 += nq) {
+        const int64_t n = std::min(nq, Lq - q0);
+        T* qc = (n == Lq) ? q2 : ggml_cont(c, ggml_view_3d(c, q2, hd, n, nh,
+                                q2->nb[1], q2->nb[2], (size_t)q0 * q2->nb[1]));   // [hd, n, nh]
+        T* kq = ggml_mul_mat(c, k2, qc);                        // [Lk, n, nh]
+        kq = ggml_soft_max_ext(c, kq, nullptr, scale, 0.0f);
+        T* kqv = ggml_mul_mat(c, v2, kq);                       // [hd, n, nh]
+        kqv = ggml_cont(c, ggml_permute(c, kqv, 0, 2, 1, 3));   // [hd, nh, n]
+        T* o = ggml_reshape_2d(c, kqv, d_model, n);             // [d_model, n]
+        out = out ? ggml_concat(c, out, o, 1) : o;
+    }
+    return out;                                                 // [d_model, Lq]
 }
 
 static T* gamma32(ggml_context* c, const Model& m, const std::string& key) {
