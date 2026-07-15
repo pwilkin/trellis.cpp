@@ -106,9 +106,14 @@ static T* sdpa(ggml_context* c, T* q, T* k, T* v, int d_model, T* mask = nullptr
     // running sum is large -- biasing low, growing with KV tile count, and it wrecked the
     // latent: mean -0.8048 vs the reference's -0.0353+-0.0064 (~120 sigma out, n=5 a side).
     // With the fix TILE honours prec and the bias drops to -0.00235, matching the exact path.
-    // Do NOT assume a stock ggml has this: check with GGML_FA_DEBUG=1 (prints kernel + prec)
-    // and trellis-test-shape-flow, whose `output` mean-delta is the canary (-0.0024 good,
-    // -0.017 = prec is being ignored again). --no-fa falls back to the exact chunked path.
+    // Do NOT assume a stock ggml has this. To check: GGML_FA_DEBUG=1 prints the kernel and
+    // prec, then run trellis-test-shape-flow twice and compare its `output` mean-delta with
+    // FA against TRELLIS_NOFA=1 (the exact-SDPA oracle). The canary is "FA tracks the oracle
+    // ON THIS BOX", not any fixed number -- the absolute values are backend-specific because
+    // the severity is: gfx1151/TILE reads -0.0174 broken vs -0.0024 fixed, while NVIDIA/MMA
+    // reads only -0.0019 vs -0.00014 (its oracle is -0.00010). MMA already accumulated KQ in
+    // FP32, so only the VKQ sum stagnated there -- same bug, ~9x milder.
+    // --no-fa falls back to the exact chunked path (correct on any backend, ~2.7x slower).
     const bool no_fa = g_no_fa;
     if (!no_fa) {
         // TRELLIS_FA_FAST=1: F16 K/V + default (F16) accumulation — the shapes
