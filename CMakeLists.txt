@@ -223,6 +223,10 @@ add_executable(trellis-test-sparse-conv src/test_sparse_conv.cpp)
 target_link_libraries(trellis-test-sparse-conv PRIVATE trellis_core)
 set_target_properties(trellis-test-sparse-conv PROPERTIES BUILD_RPATH "${GGML_RPATH}")
 
+add_executable(trellis-test-bigop src/test_bigop.cpp)
+target_link_libraries(trellis-test-bigop PRIVATE trellis_core)
+set_target_properties(trellis-test-bigop PROPERTIES BUILD_RPATH "${GGML_RPATH}")
+
 add_executable(trellis-test-c2s src/test_c2s.cpp)
 target_link_libraries(trellis-test-c2s PRIVATE trellis_core)
 set_target_properties(trellis-test-c2s PROPERTIES BUILD_RPATH "${GGML_RPATH}")
