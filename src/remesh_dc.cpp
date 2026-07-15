@@ -45,7 +45,7 @@ void parallel_for(int64_t n, const std::function<void(int64_t, int64_t)>& fn) {
 }  // namespace
 
 Mesh remesh_narrow_band_dc(const float* iverts, int64_t iV, const int32_t* ifaces, int64_t iF,
-                           const TriBvh& bvh, int res, int band) {
+                           const TriBvh& bvh, int res, int band, float project_back) {
     (void)iV;
     Mesh out;
     if (iF == 0 || bvh.empty() || res <= 0) return out;
@@ -271,8 +271,38 @@ Mesh remesh_narrow_band_dc(const float* iverts, int64_t iV, const int32_t* iface
         }
     out.faces.resize(qfaces.size());
     for (size_t k = 0; k < qfaces.size(); ++k) out.faces[k] = remap[qfaces[k]];
-    printf("  remesh_dc: %lld active voxels -> V=%d F=%d (eps=%.4g)\n",
-           (long long)Na, out.V(), out.F(), eps);
+
+    // Project the dual vertices back onto the input surface (reference:
+    // remesh_project=0.9, o_voxel/postprocess.py::to_glb -> remeshing.py §8).
+    // Dual contouring places each vertex at the plain MEAN of its cell's edge
+    // crossings, on the eps-offset shell — so sharp features come out rounded and
+    // the shell keeps its own offset noise. Lerping each vertex back toward its
+    // closest point on the original surface restores those features. The BVH's
+    // closest point is exactly the reference's barycentric interpolation of the
+    // hit triangle, so no uvw round-trip is needed.
+    if (project_back > 0.0f) {
+        const int64_t NV = (int64_t)out.verts.size() / 3;
+        std::atomic<int64_t> missed{0};
+        parallel_for(NV, [&](int64_t b, int64_t e) {
+            int64_t local = 0;
+            for (int64_t i = b; i < e; ++i) {
+                float* v = &out.verts[3 * i];
+                const float p[3] = {v[0], v[1], v[2]};
+                // Vertices sit on the eps shell, so the surface is ~eps away; the
+                // same bound the field pass uses is comfortably sufficient.
+                const TriBvh::Hit h = bvh.closest(p, eps + 2 * cell);
+                if (h.face < 0) { ++local; continue; }   // no hit in range: leave as-is
+                for (int k = 0; k < 3; ++k) v[k] = p[k] - project_back * (p[k] - h.point[k]);
+            }
+            if (local) missed.fetch_add(local, std::memory_order_relaxed);
+        });
+        if (missed.load())
+            printf("  remesh_dc: project_back %.2f (%lld/%lld vertices had no hit in range)\n",
+                   project_back, (long long)missed.load(), (long long)NV);
+    }
+
+    printf("  remesh_dc: %lld active voxels -> V=%d F=%d (eps=%.4g, project_back=%.2f)\n",
+           (long long)Na, out.V(), out.F(), eps, project_back);
     fflush(stdout);
     return out;
 }
