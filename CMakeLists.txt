@@ -94,6 +94,10 @@ if(TARGET ggml-cuda)
   target_sources(trellis_core PRIVATE src/deform_conv.cu)
   # Self-contained CUDA QEM decimation (mirrors the CPU port; uses cub for scan/sort/RLE).
   target_sources(trellis_core PRIVATE src/decimate_qem.cu)
+  if(MSVC)
+    # CUDA 13.3 CCCL requires MSVC's conforming preprocessor for host compilation.
+    target_compile_options(trellis_core PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>")
+  endif()
   target_compile_definitions(trellis_core PUBLIC TRELLIS_HAVE_GPU_DECIMATE)
   set_target_properties(trellis_core PROPERTIES CUDA_ARCHITECTURES "86;120" CUDA_RUNTIME_LIBRARY Shared)
   target_link_libraries(trellis_core PUBLIC CUDA::cudart)
