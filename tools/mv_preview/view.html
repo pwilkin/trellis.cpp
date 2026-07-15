@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>trellis.cpp model viewer</title>
+<script type="module" src="model-viewer.min.js"></script>
+<style>
+  :root { --bg:#1e1e1e; --panel:#252526; --line:#3c3c3c; --fg:#e4e4e4; --dim:#9a9a9a; --accent:#4ea1ff; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+               font:13px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; }
+  #app { display:flex; flex-direction:column; height:100%; }
+  #bar { display:flex; gap:14px; align-items:center; flex-wrap:wrap;
+         padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--line); }
+  .grp { display:flex; gap:6px; align-items:center; }
+  .grp > label { color:var(--dim); }
+  select, button { background:#333; color:var(--fg); border:1px solid var(--line);
+                   border-radius:4px; padding:4px 8px; font:inherit; }
+  select:hover, button:hover { border-color:var(--accent); }
+  button.on { background:var(--accent); color:#08131f; border-color:var(--accent); }
+  input[type=range] { width:90px; vertical-align:middle; }
+  #stage { flex:1; display:grid; gap:1px; background:var(--line); min-height:0; }
+  #stage.one { grid-template-columns:1fr; }
+  #stage.two { grid-template-columns:1fr 1fr; }
+  .pane { position:relative; background:var(--bg); min-width:0; }
+  model-viewer { width:100%; height:100%; background:var(--bg); --poster-color:transparent; }
+  .tag { position:absolute; top:8px; left:10px; z-index:2; pointer-events:none;
+         background:#000a; padding:2px 8px; border-radius:4px; color:#ffe873; font-size:12px; }
+  .hint { color:var(--dim); font-size:12px; margin-left:auto; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="bar">
+    <div class="grp">
+      <label>model</label>
+      <select id="selA"></select>
+    </div>
+    <div class="grp">
+      <button id="cmpBtn" title="Side-by-side with synced cameras">compare</button>
+      <select id="selB" disabled></select>
+    </div>
+    <div class="grp">
+      <label>env</label>
+      <select id="env">
+        <option value="neutral">neutral (IBL — shows metal)</option>
+        <option value="legacy">legacy</option>
+        <option value="">none (flat)</option>
+      </select>
+    </div>
+    <div class="grp"><label>exposure</label><input type="range" id="exp" min="0.1" max="3" step="0.05" value="1"></div>
+    <div class="grp"><label>shadow</label><input type="range" id="shadow" min="0" max="1" step="0.05" value="1"></div>
+    <div class="grp">
+      <button id="rotBtn" title="Auto-rotate">spin</button>
+      <button id="bgBtn" title="Toggle dark/light background">bg</button>
+      <button id="resetBtn" title="Reset camera">reset</button>
+    </div>
+    <span class="hint">drag = rotate · scroll = zoom · right-drag = pan</span>
+  </div>
+  <div id="stage" class="one"></div>
+</div>
+
+<script>
+const stage = document.getElementById('stage');
+const selA = document.getElementById('selA'), selB = document.getElementById('selB');
+const cmpBtn = document.getElementById('cmpBtn'), rotBtn = document.getElementById('rotBtn');
+const bgBtn = document.getElementById('bgBtn'), resetBtn = document.getElementById('resetBtn');
+const envSel = document.getElementById('env'), expIn = document.getElementById('exp'), shIn = document.getElementById('shadow');
+const params = new URLSearchParams(location.search);
+let compare = params.has('b'), spin = false, light = false;
+
+function mkViewer(label) {
+  const pane = document.createElement('div'); pane.className = 'pane';
+  const tag = document.createElement('div'); tag.className = 'tag'; tag.textContent = label;
+  const mv = document.createElement('model-viewer');
+  mv.setAttribute('camera-controls', '');           // orbit + zoom + pan
+  mv.setAttribute('touch-action', 'none');
+  mv.setAttribute('interaction-prompt', 'none');
+  mv.setAttribute('loading', 'eager');
+  mv.setAttribute('min-field-of-view', '2deg');     // allow deep zoom-in
+  mv.setAttribute('max-field-of-view', '60deg');
+  pane.appendChild(tag); pane.appendChild(mv);
+  pane._tag = tag; pane._mv = mv;
+  return pane;
+}
+
+let paneA = mkViewer(''), paneB = mkViewer('');
+function layout() {
+  stage.innerHTML = '';
+  stage.className = compare ? 'two' : 'one';
+  stage.appendChild(paneA);
+  if (compare) stage.appendChild(paneB);
+  cmpBtn.classList.toggle('on', compare);
+  selB.disabled = !compare;
+  apply();
+}
+
+function apply() {
+  const vs = compare ? [paneA, paneB] : [paneA];
+  const srcs = [selA.value, selB.value];
+  vs.forEach((p, i) => {
+    const mv = p._mv;
+    if (mv.getAttribute('src') !== srcs[i]) mv.setAttribute('src', srcs[i]);
+    p._tag.textContent = srcs[i].replace('.glb', '');
+    mv.setAttribute('exposure', expIn.value);
+    mv.setAttribute('shadow-intensity', shIn.value);
+    if (envSel.value) mv.setAttribute('environment-image', envSel.value);
+    else mv.removeAttribute('environment-image');
+    mv.toggleAttribute('auto-rotate', spin);
+    mv.style.background = light ? '#d8d8d8' : '#1e1e1e';
+  });
+  stage.style.background = light ? '#bbb' : '#3c3c3c';
+}
+
+// keep the two cameras locked together so differences are geometric, not viewpoint
+function sync(from, to) {
+  from._mv.addEventListener('camera-change', (e) => {
+    if (!compare || e.detail.source !== 'user-interaction') return;
+    const o = from._mv.getCameraOrbit(), t = from._mv.getCameraTarget();
+    to._mv.cameraOrbit  = `${o.theta}rad ${o.phi}rad ${o.radius}m`;
+    to._mv.cameraTarget = `${t.x}m ${t.y}m ${t.z}m`;
+    to._mv.fieldOfView  = from._mv.getFieldOfView() + 'deg';
+  });
+}
+sync(paneA, paneB); sync(paneB, paneA);
+
+cmpBtn.onclick = () => { compare = !compare; layout(); };
+rotBtn.onclick = () => { spin = !spin; rotBtn.classList.toggle('on', spin); apply(); };
+bgBtn.onclick  = () => { light = !light; bgBtn.classList.toggle('on', light); apply(); };
+resetBtn.onclick = () => { [paneA, paneB].forEach(p => { p._mv.cameraOrbit = 'auto auto auto'; p._mv.fieldOfView = 'auto'; p._mv.cameraTarget = 'auto auto auto'; }); };
+[selA, selB, envSel, expIn, shIn].forEach(el => el.addEventListener('input', apply));
+
+// populate from the server's directory listing so new .glb files show up automatically
+(async () => {
+  let names = [];
+  try {                                   // live manifest (index.html shadows the dir listing)
+    names = await (await fetch('/models.json', { cache: 'no-store' })).json();
+  } catch (e) {
+    try {                                 // fallback: parse a dir listing if one is served
+      const html = await (await fetch('/')).text();
+      names = [...html.matchAll(/href="([^"]+\.glb)"/g)].map(m => decodeURIComponent(m[1])).sort();
+    } catch (e2) { /* fall through */ }
+  }
+  if (!names.length) names = ['goblinours.glb', 'gref1.glb', 'gref2.glb'];
+  for (const s of [selA, selB]) {
+    s.innerHTML = '';
+    for (const n of names) { const o = document.createElement('option'); o.value = n; o.textContent = n.replace('.glb',''); s.appendChild(o); }
+  }
+  selA.value = params.get('a') || (names.includes('goblinours.glb') ? 'goblinours.glb' : names[0]);
+  selB.value = params.get('b') || (names.includes('gref2.glb') ? 'gref2.glb' : names[Math.min(1, names.length-1)]);
+  layout();
+})();
+</script>
+</body>
+</html>
