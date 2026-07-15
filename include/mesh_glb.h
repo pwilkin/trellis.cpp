@@ -8,7 +8,7 @@ namespace trellis {
 // Applies the TRELLIS->glTF rotation (x,y,z)->(x,z,-y) and writes a single-mesh GLB.
 // colors: optional [V*3] float RGB in [0,1] -> emitted as COLOR_0 (vertex colors).
 bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* faces, int64_t F,
-               const float* colors = nullptr);
+               const float* colors = nullptr, int64_t seed = -1);
 
 // Textured GLB: POSITION + NORMAL + TEXCOORD_0 + indices, PBR material with embedded
 // base-color and metallic-roughness textures (lossy WebP via EXT_texture_webp when built
@@ -18,7 +18,7 @@ bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* f
 bool write_glb_textured(const char* path, const float* verts, int64_t V, const float* uv,
                         const int32_t* faces, int64_t F,
                         const unsigned char* base_rgba, const unsigned char* mr_rgba, int T,
-                        bool double_sided = false);
+                        bool double_sided = false, int64_t seed = -1);
 
 // Debug helper: binary little-endian PLY in raw TRELLIS space (no axis swap).
 // colors: optional [V*3] float RGB in [0,1] -> written as uchar red/green/blue per vertex.

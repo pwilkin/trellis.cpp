@@ -27,7 +27,7 @@ static void w_u32(std::vector<uint8_t>& o, uint32_t v) {
 }
 
 bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* faces, int64_t F,
-               const float* colors) {
+               const float* colors, int64_t seed) {
     // 1. rotate (x,y,z)->(x,z,-y); track min/max
     std::vector<float> pos((size_t)V * 3);
     float mn[3] = { FLT_MAX, FLT_MAX, FLT_MAX }, mx[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
@@ -54,9 +54,13 @@ bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* f
         std::snprintf(bv2, sizeof(bv2), ",{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34962}", posBytes + idxBytes, colBytes);
     } else { attr[0]=0; acc2[0]=0; bv2[0]=0; std::snprintf(attr, sizeof(attr), "\"POSITION\":0"); }
 
+    char seed_json[96];
+    if (seed >= 0) std::snprintf(seed_json, sizeof(seed_json), ",\"extras\":{\"seed\":%lld}", (long long)seed);
+    else seed_json[0] = 0;
+
     char buf[2048];
     std::snprintf(buf, sizeof(buf),
-        "{\"asset\":{\"version\":\"2.0\",\"generator\":\"trellis.cpp\"},"
+        "{\"asset\":{\"version\":\"2.0\",\"generator\":\"trellis.cpp\"%s},"
         "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}],"
         "\"meshes\":[{\"primitives\":[{\"attributes\":{%s},\"indices\":1,\"mode\":4}]}],"
         "\"accessors\":["
@@ -67,7 +71,7 @@ bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* f
         "{\"buffer\":0,\"byteOffset\":0,\"byteLength\":%u,\"target\":34962},"
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34963}%s],"
         "\"buffers\":[{\"byteLength\":%u}]}",
-        attr, (long long)V, mn[0], mn[1], mn[2], mx[0], mx[1], mx[2],
+        seed_json, attr, (long long)V, mn[0], mn[1], mn[2], mx[0], mx[1], mx[2],
         (long long)(F * 3), acc2, posBytes, posBytes, idxBytes, bv2, posBytes + idxBytes + colBytes);
     std::string json(buf);
     while (json.size() % 4 != 0) json.push_back(' ');
@@ -91,7 +95,7 @@ bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* f
 bool write_glb_textured(const char* path, const float* verts, int64_t V, const float* uv,
                         const int32_t* faces, int64_t F,
                         const unsigned char* base_rgba, const unsigned char* mr_rgba, int T,
-                        bool double_sided) {
+                        bool double_sided, int64_t seed) {
     // rotate positions (x,z,-y) + min/max
     std::vector<float> pos((size_t)V*3);
     float mn[3]={FLT_MAX,FLT_MAX,FLT_MAX}, mx[3]={-FLT_MAX,-FLT_MAX,-FLT_MAX};
@@ -147,9 +151,13 @@ bool write_glb_textured(const char* path, const float* verts, int64_t V, const f
     bin.insert(bin.end(), pngB.begin(), pngB.end()); pad4(bin); const uint32_t off5=(uint32_t)bin.size();
     bin.insert(bin.end(), pngM.begin(), pngM.end()); pad4(bin);
 
+    char seed_json[96];
+    if (seed >= 0) std::snprintf(seed_json, sizeof(seed_json), ",\"extras\":{\"seed\":%lld}", (long long)seed);
+    else seed_json[0] = 0;
+
     char buf[3000];
     std::snprintf(buf,sizeof(buf),
-        "{\"asset\":{\"version\":\"2.0\",\"generator\":\"trellis.cpp\"},"
+        "{\"asset\":{\"version\":\"2.0\",\"generator\":\"trellis.cpp\"%s},"
         "%s"
         "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}],"
         "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"TEXCOORD_0\":2},\"indices\":3,\"material\":0,\"mode\":4}]}],"
@@ -170,6 +178,7 @@ bool write_glb_textured(const char* path, const float* verts, int64_t V, const f
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u},"
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u}],"
         "\"buffers\":[{\"byteLength\":%u}]}",
+        seed_json,
         webp ? "\"extensionsUsed\":[\"EXT_texture_webp\"],\"extensionsRequired\":[\"EXT_texture_webp\"]," : "",
         double_sided ? "true" : "false",
         webp ? "\"textures\":[{\"sampler\":0,\"extensions\":{\"EXT_texture_webp\":{\"source\":0}}},{\"sampler\":0,\"extensions\":{\"EXT_texture_webp\":{\"source\":1}}}],"
