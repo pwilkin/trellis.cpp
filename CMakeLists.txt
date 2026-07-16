@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(trellis_cpp VERSION 0.4.0 LANGUAGES CXX C)
+project(trellis_cpp VERSION 0.4.1 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
