@@ -21,6 +21,21 @@ static double now() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+// boundary/non-manifold audit over the welded index space (positions assumed welded)
+#include <unordered_map>
+static void audit(const char* tag, const std::vector<int32_t>& faces) {
+    std::unordered_map<uint64_t,int> e;
+    e.reserve(faces.size() * 2);
+    const size_t F = faces.size() / 3;
+    auto k = [](int a, int b){ if (a>b){int t=a;a=b;b=t;} return ((uint64_t)(uint32_t)a<<32)|(uint32_t)b; };
+    for (size_t f = 0; f < F; ++f)
+        for (int j = 0; j < 3; ++j) e[k(faces[3*f+j], faces[3*f+(j+1)%3])]++;
+    size_t nb = 0, nm = 0;
+    for (auto& kv : e) { if (kv.second == 1) ++nb; else if (kv.second > 2) ++nm; }
+    printf("  [audit] %-22s F=%-9zu boundary_edges=%-7zu nonmanifold=%zu\n", tag, F, nb, nm);
+    fflush(stdout);
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) { fprintf(stderr, "usage: post-replay <dump.bin> <out.glb> [opts]\n"); return 1; }
     const char* dump = argv[1];
@@ -60,8 +75,10 @@ int main(int argc, char** argv) {
     double t = now();
     if (do_weld) trellis::weld_vertices(verts, faces, nullptr, 1.0f / ((float)res * 8.0f));
     printf("  [weld %.1fs]\n", now()-t); t = now();
+    audit("weld", faces);
     if (do_fill) trellis::fill_small_holes(faces);
     printf("  [fill %.1fs]\n", now()-t); t = now();
+    audit("fill_small_holes", faces);
 
     trellis::TriBvh bvh = trellis::TriBvh::build(verts.data(), (int64_t)verts.size()/3,
                                                  faces.data(), (int64_t)faces.size()/3);
@@ -71,6 +88,15 @@ int main(int argc, char** argv) {
         rm = trellis::remesh_narrow_band_dc(verts.data(), (int64_t)verts.size()/3,
                                             faces.data(), (int64_t)faces.size()/3, bvh, res, band);
         printf("  [remesh %.1fs]\n", now()-t); t = now();
+        audit("remesh", rm.faces);
+        // match the CLI: clean degenerates/unify winding, drop floater components
+        if (rm.F() > 0) {
+            trellis::clean_mesh(rm.V(), rm.faces);
+            audit("clean_mesh", rm.faces);
+            int ndrop = trellis::drop_small_components(rm.verts, rm.faces, 0.02f);
+            printf("  [clean+drop %.1fs] dropped=%d\n", now()-t, ndrop); t = now();
+            audit("drop_components", rm.faces);
+        }
     }
     const std::vector<float>& sverts = rm.F() > 0 ? rm.verts : verts;
     const std::vector<int32_t>& sfaces = rm.F() > 0 ? rm.faces : faces;
@@ -79,9 +105,16 @@ int main(int argc, char** argv) {
     if (decim > 0) trellis::decimate_cluster(sverts, (int)sverts.size()/3, sfaces, (int)sfaces.size()/3, {}, decim, dv, df, dp);
     else if (decim == 0) { dv = sverts; df = sfaces; }
     else {
-        trellis::decimate_simplify(sverts, (int)sverts.size()/3, sfaces, (int)sfaces.size()/3, faces_target, dv, df);
+        // match the CLI: faithful QEM port (not the old meshopt/FQMS decimate_simplify)
+        trellis::decimate_qem(sverts, (int)sverts.size()/3, sfaces, (int)sfaces.size()/3, faces_target, dv, df);
+        audit("decimate_qem", df);
         trellis::weld_vertices(dv, df, nullptr, 1.0f / ((float)res * 8.0f));
+        audit("weld2", df);
         trellis::fill_small_holes(df);
+        audit("fill2", df);
+        int ndrop2 = trellis::drop_small_components(dv, df, 0.03f);
+        if (ndrop2) printf("  dropped %d more comps\n", ndrop2);
+        audit("drop2", df);
     }
     printf("  [decimate %.1fs]\n", now()-t); t = now();
     if (!do_bake) { printf("(--no-bake) done\n"); return 0; }
@@ -95,6 +128,8 @@ int main(int argc, char** argv) {
         bm = trellis::uv_chart_project(dv, (int)dv.size()/3, df, (int)df.size()/3, no_vp, atlas, &vox);
     printf("  [bake %.1fs]\n", now()-t);
     if (!bm.ok()) { fprintf(stderr, "bake failed\n"); return 1; }
+    printf("  [audit] bake: faces in=%zu out=%zu (dropped %lld)\n",
+           df.size()/3, bm.faces.size()/3, (long long)(df.size()/3) - (long long)(bm.faces.size()/3));
     trellis::write_glb_textured(out, bm.verts.data(), (int64_t)bm.verts.size()/3, bm.uv.data(),
                                 bm.faces.data(), (int64_t)bm.faces.size()/3, bm.base.data(), bm.mr.data(), bm.T,
                                 /*double_sided=*/rm.F() == 0);

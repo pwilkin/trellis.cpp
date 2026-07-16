@@ -56,12 +56,40 @@ static MeshStats analyze(const std::vector<float>& v, const std::vector<int32_t>
     for (auto& kv : ec) { if (kv.second == 1) s.open_edges++; else if (kv.second > 2) s.nonmanifold_edges++; }
     return s;
 }
+// Dihedral distribution over shared edges: the faceting metric. smooth=<2deg, facet=2-15deg.
+static void dihedral(const char* tag, const std::vector<float>& v, const std::vector<int32_t>& f) {
+    const int F = (int)f.size()/3;
+    std::vector<float> fn((size_t)F*3);
+    for (int t = 0; t < F; ++t) {
+        const float* a=&v[3*f[3*t]], *b=&v[3*f[3*t+1]], *c=&v[3*f[3*t+2]];
+        float u[3]={b[0]-a[0],b[1]-a[1],b[2]-a[2]}, w[3]={c[0]-a[0],c[1]-a[1],c[2]-a[2]};
+        float n[3]={u[1]*w[2]-u[2]*w[1], u[2]*w[0]-u[0]*w[2], u[0]*w[1]-u[1]*w[0]};
+        float l=std::sqrt(n[0]*n[0]+n[1]*n[1]+n[2]*n[2]); if(l<1e-20f)l=1;
+        fn[3*t]=n[0]/l; fn[3*t+1]=n[1]/l; fn[3*t+2]=n[2]/l;
+    }
+    std::unordered_map<uint64_t,int> em; em.reserve((size_t)F*2);
+    auto key=[](int a,int b){ if(a>b){int t=a;a=b;b=t;} return ((uint64_t)(uint32_t)a<<32)|(uint32_t)b; };
+    double sum=0; long n=0, smooth=0, facet=0;
+    for (int t=0;t<F;++t) for(int e=0;e<3;++e){
+        uint64_t k=key(f[3*t+e], f[3*t+(e+1)%3]);
+        auto it=em.find(k);
+        if(it==em.end()){ em[k]=t; continue; }
+        int t2=it->second;
+        float d=fn[3*t]*fn[3*t2]+fn[3*t+1]*fn[3*t2+1]+fn[3*t+2]*fn[3*t2+2];
+        d=d>1?1:(d<-1?-1:d);
+        float ang=std::acos(d)*57.29578f;
+        sum+=ang; n++; if(ang<2)smooth++; else if(ang<15)facet++;
+    }
+    std::printf("  [%s] dihedral: mean=%.2fdeg  smooth(<2)=%.1f%%  facet(2-15)=%.1f%%  (n=%ld edges)\n",
+                tag, n?sum/n:0.0, n?100.0*smooth/n:0.0, n?100.0*facet/n:0.0, n);
+}
 static void report(const char* tag, const std::vector<float>& v, const std::vector<int32_t>& f) {
     MeshStats s = analyze(v, f);
     std::printf("  [%s] V=%d F=%d  bbox=[%.3f,%.3f,%.3f]..[%.3f,%.3f,%.3f]  open_edges=%ld nonmanifold=%ld finite=%d\n",
                 tag, (int)v.size()/3, (int)f.size()/3,
                 s.bb[0],s.bb[1],s.bb[2], s.bb[3],s.bb[4],s.bb[5],
                 s.open_edges, s.nonmanifold_edges, (int)s.finite);
+    dihedral(tag, v, f);
 }
 
 int main(int argc, char** argv) {
@@ -85,11 +113,15 @@ int main(int argc, char** argv) {
     report("input", v, f);
     std::fflush(stdout);
 
+    const bool skip_cpu = std::getenv("TD_SKIP_CPU") != nullptr;
+    const char* out_bin = std::getenv("TD_OUT");   // write GPU output mesh here (V,F,verts,faces)
     // --- CPU reference ---
     std::vector<float> ov_c; std::vector<int32_t> of_c;
-    std::printf("CPU decimate_qem:\n"); std::fflush(stdout);
-    trellis::decimate_qem(v, V, f, F, target, ov_c, of_c);
-    report("cpu", ov_c, of_c);
+    if (!skip_cpu) {
+        std::printf("CPU decimate_qem:\n"); std::fflush(stdout);
+        trellis::decimate_qem(v, V, f, F, target, ov_c, of_c);
+        report("cpu", ov_c, of_c);
+    }
 
     // --- GPU port ---
     std::vector<float> ov_g; std::vector<int32_t> of_g;
@@ -97,6 +129,14 @@ int main(int argc, char** argv) {
     bool gpu_ok = trellis::decimate_qem_gpu(v, V, f, F, target, ov_g, of_g);
     if (!gpu_ok) { std::printf("  GPU path returned false (no device / failure) -- CPU fallback only\n"); return 2; }
     report("gpu", ov_g, of_g);
+    if (out_bin) {
+        FILE* fo = std::fopen(out_bin, "wb");
+        if (fo) { int gv=(int)ov_g.size()/3, gf=(int)of_g.size()/3;
+            std::fwrite(&gv,4,1,fo); std::fwrite(&gf,4,1,fo);
+            std::fwrite(ov_g.data(),4,ov_g.size(),fo); std::fwrite(of_g.data(),4,of_g.size(),fo); std::fclose(fo);
+            std::printf("  wrote GPU mesh -> %s\n", out_bin); }
+    }
+    if (skip_cpu) return 0;
 
     // --- comparison / pass criteria ---
     int Fc = (int)of_c.size()/3, Fg = (int)of_g.size()/3;
