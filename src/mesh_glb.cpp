@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <array>
+#include <unordered_map>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -104,18 +106,45 @@ bool write_glb_textured(const char* path, const float* verts, int64_t V, const f
     if (V==0){mn[0]=mn[1]=mn[2]=0;mx[0]=mx[1]=mx[2]=0;}
 
     // area-weighted vertex normals (in the rotated frame) so viewers shade
-    // smoothly instead of the glTF-mandated flat fallback
+    // smoothly instead of the glTF-mandated flat fallback.
+    // Accumulate on POSITION-WELDED groups: xatlas duplicates vertices along UV
+    // seams, and per-copy normals would only see their own chart's faces --
+    // every chart border then becomes a shading crease and each chart reads as
+    // its own facet ("patchy skin"). The reference computes normals on the
+    // welded mesh before the UV split; welding by exact position matches that.
+    std::vector<int64_t> rep((size_t)V);
+    {
+        struct KeyHash {
+            size_t operator()(const std::array<float,3>& k) const {
+                size_t h = 1469598103934665603ull;
+                const unsigned char* p = (const unsigned char*)k.data();
+                for (int i = 0; i < 12; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+                return h;
+            }
+        };
+        std::unordered_map<std::array<float,3>, int64_t, KeyHash> first;
+        first.reserve((size_t)V);
+        for (int64_t i=0;i<V;++i){
+            const std::array<float,3> k{pos[3*i], pos[3*i+1], pos[3*i+2]};
+            rep[i] = first.emplace(k, i).first->second;
+        }
+    }
     std::vector<float> nrm((size_t)V*3, 0.f);
     for (int64_t f=0;f<F;++f){
         const int64_t a=faces[3*f], b=faces[3*f+1], c=faces[3*f+2];
         float e1[3], e2[3], n[3];
         for(int k=0;k<3;++k){ e1[k]=pos[3*b+k]-pos[3*a+k]; e2[k]=pos[3*c+k]-pos[3*a+k]; }
         n[0]=e1[1]*e2[2]-e1[2]*e2[1]; n[1]=e1[2]*e2[0]-e1[0]*e2[2]; n[2]=e1[0]*e2[1]-e1[1]*e2[0];
-        for(int j=0;j<3;++j){ const int64_t v=faces[3*f+j]; for(int k=0;k<3;++k) nrm[3*v+k]+=n[k]; }
+        for(int j=0;j<3;++j){ const int64_t v=rep[faces[3*f+j]]; for(int k=0;k<3;++k) nrm[3*v+k]+=n[k]; }
     }
     for (int64_t i=0;i<V;++i){
+        if (rep[i] != i) continue;
         const float l=std::sqrt(nrm[3*i]*nrm[3*i]+nrm[3*i+1]*nrm[3*i+1]+nrm[3*i+2]*nrm[3*i+2]);
         if (l>1e-20f) for(int k=0;k<3;++k) nrm[3*i+k]/=l; else nrm[3*i+2]=1.f;
+    }
+    for (int64_t i=0;i<V;++i){
+        const int64_t r=rep[i];
+        if (r != i) for(int k=0;k<3;++k) nrm[3*i+k]=nrm[3*r+k];
     }
 
     // encode textures — lossy WebP at the reference's quality when available,
