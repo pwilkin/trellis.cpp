@@ -269,6 +269,11 @@ void decimate_cluster(const std::vector<float>& verts, int V, const std::vector<
 int weld_vertices(std::vector<float>& verts, std::vector<int32_t>& faces, std::vector<float>* colors3,
                   float step) {
     const int V = (int)verts.size() / 3;
+    if (colors3 && colors3->size() != verts.size()) {   // guard: per-vertex colors out of sync
+        fprintf(stderr, "  weld: colors/verts size mismatch (%zu vs %zu), ignoring colors\n",
+                colors3->size(), verts.size());
+        colors3 = nullptr;
+    }
     const float eps2 = step * step;
     auto ckey = [](int64_t x, int64_t y, int64_t z) {
         return ((uint64_t)(uint32_t)(int32_t)x << 42) ^ ((uint64_t)(uint32_t)(int32_t)y << 21) ^ (uint64_t)(uint32_t)(int32_t)z;

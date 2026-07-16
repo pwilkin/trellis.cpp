@@ -303,6 +303,19 @@ int trellis_run(const trellis::TrellisParams& cfg) {
             }
             printf("      PBR voxels=%d @res%d\n", Mv, pbr_res);
         }
+        // `colors` is per-VOXEL but consumed per-VERTEX (weld, vertex-color GLB, PLY),
+        // relying on dual_grid_to_mesh's vertex==voxel correspondence. fill_holes adds
+        // cap vertices beyond Mv -- pad them (neutral grey; the caps are sub-voxel and
+        // the real texture comes from the voxel-volume bake, not these colors). In
+        // mixed-res mode the correspondence never held at all (res-512 voxels vs
+        // res-1024 vertices): drop the colors instead of reading out of bounds.
+        // (Windows surfaced this as a silent crash at [7/7]; Linux read garbage.)
+        if (colors.size() != (size_t)mesh.V() * 3) {
+            if (pbr_res == so.res && colors.size() < (size_t)mesh.V() * 3)
+                colors.resize((size_t)mesh.V() * 3, 0.5f);
+            else
+                colors.clear();
+        }
     }
 
     printf("[7/7] write %s\n", outglb.c_str());
