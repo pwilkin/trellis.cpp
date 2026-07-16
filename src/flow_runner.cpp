@@ -9,9 +9,21 @@
 #include <cstdlib>
 #include <cstdio>
 #include <stdexcept>
+#if defined(_WIN32)
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace trellis {
+
+static bool stdout_is_tty() {
+#if defined(_WIN32)
+    return _isatty(_fileno(stdout)) != 0;
+#else
+    return isatty(fileno(stdout)) != 0;
+#endif
+}
 
 static void timestep_embedding(float t, std::vector<float>& out) {
     out.resize(256);
@@ -139,7 +151,7 @@ std::vector<float> sample_flow(const FlowFwd& fwd, std::vector<float> sample,
     // a hang. On a TTY redraw one line; when redirected to a log, emit a line per step (12
     // steps, so it stays readable). ETA from the mean step so far -- steps are near-uniform
     // except where the guidance interval drops a forward, so it settles after step 2.
-    const bool tty = isatty(fileno(stdout));
+    const bool tty = stdout_is_tty();
     auto progress = [&](int done) {
         const double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - tflow0).count();
         char bar[21];
