@@ -9,6 +9,35 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+find_package(Git QUIET)
+set(TRELLIS_GIT_COMMIT "")
+set(TRELLIS_GIT_DIRTY 0)
+string(TIMESTAMP TRELLIS_BUILD_TIMESTAMP_UTC "%Y-%m-%dT%H:%M:%SZ" UTC)
+if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    OUTPUT_VARIABLE TRELLIS_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE TRELLIS_GIT_COMMIT_RESULT)
+  if(TRELLIS_GIT_COMMIT_RESULT EQUAL 0)
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=no
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+      OUTPUT_VARIABLE TRELLIS_GIT_STATUS
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET)
+    if(NOT "${TRELLIS_GIT_STATUS}" STREQUAL "")
+      set(TRELLIS_GIT_DIRTY 1)
+    endif()
+  else()
+    set(TRELLIS_GIT_COMMIT "")
+  endif()
+endif()
+
+set(TRELLIS_BUILD_BACKEND "cpu")
+
 # --- vendored ggml submodule, built in-tree --------------------------------
 # Backend is selected at configure time with the upstream flags
 # (-DGGML_CUDA=ON / -DGGML_VULKAN=ON); the matching ggml-<backend> target then
@@ -27,6 +56,7 @@ set(CMAKE_INSTALL_RPATH "$ORIGIN")
 
 # --- CUDA language (for the custom deformable-conv kernel) ------------------
 if(TARGET ggml-cuda)
+  set(TRELLIS_BUILD_BACKEND "cuda")
   if(EXISTS /usr/local/cuda-13.3/bin/nvcc AND NOT CMAKE_CUDA_COMPILER)
     set(CMAKE_CUDA_COMPILER /usr/local/cuda-13.3/bin/nvcc)
   endif()
@@ -59,11 +89,12 @@ add_library(trellis_core STATIC
   src/decimate_qem.cpp
 )
 target_include_directories(trellis_core PUBLIC include ${GGML_DIR}/include ${CMAKE_SOURCE_DIR}/thirdparty/stb ${CMAKE_SOURCE_DIR}/thirdparty/xatlas ${CMAKE_SOURCE_DIR}/thirdparty/meshoptimizer ${CMAKE_SOURCE_DIR}/thirdparty/fqms)
+target_compile_definitions(trellis_core PRIVATE TRELLIS_GIT_COMMIT="${TRELLIS_GIT_COMMIT}" TRELLIS_GIT_DIRTY=${TRELLIS_GIT_DIRTY} TRELLIS_BUILD_TIMESTAMP="${TRELLIS_BUILD_TIMESTAMP_UTC}")
 target_link_libraries(trellis_core PUBLIC ggml ggml-base ggml-cpu)
 
 # --- WebP textures (reference-parity GLB export) ---------------------------
-# The reference exports lossy-WebP textures via EXT_texture_webp. Fetched at
-# configure time; disable (or let the fetch fail offline) to fall back to PNG.
+# Optional lossy-WebP textures via EXT_texture_webp. The exporter only advertises
+# the extension when WebP encoding is actually used for the embedded textures.
 option(TRELLIS_WEBP "Encode GLB textures as WebP (EXT_texture_webp)" ON)
 if(TRELLIS_WEBP)
   include(FetchContent)
@@ -109,6 +140,7 @@ else()
   # channels (see deform_conv_cpu.cpp) -- no OpenMP/libomp dependency.
   target_sources(trellis_core PRIVATE src/deform_conv_cpu.cpp)
   if(TARGET ggml-vulkan)
+    set(TRELLIS_BUILD_BACKEND "vulkan")
     find_package(Vulkan REQUIRED COMPONENTS glslc)
     set(DEFORM_SPV_H ${CMAKE_CURRENT_BINARY_DIR}/deform_conv_comp.h)
     add_custom_command(
@@ -147,10 +179,12 @@ else()
   endif()
 endif()
 if(TARGET ggml-vulkan)
+  set(TRELLIS_BUILD_BACKEND "vulkan")
   target_link_libraries(trellis_core PUBLIC ggml-vulkan)
   message(STATUS "trellis.cpp: Vulkan backend enabled")
 endif()
 if(TARGET ggml-hip)
+  set(TRELLIS_BUILD_BACKEND "hip")
   target_link_libraries(trellis_core PUBLIC ggml-hip)
   # Compile the self-contained QEM decimation kernel as HIP (ggml enabled the HIP
   # language via its subdirectory). hipcub headers live under the ROCm include root.
@@ -181,6 +215,8 @@ if(TARGET ggml-hip)
   set_target_properties(trellis_core PROPERTIES HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}")
   message(STATUS "trellis.cpp: HIP/ROCm backend enabled (GPU decimation via HIP, arch ${CMAKE_HIP_ARCHITECTURES})")
 endif()
+
+target_compile_definitions(trellis_core PRIVATE TRELLIS_BUILD_BACKEND="${TRELLIS_BUILD_BACKEND}")
 
 # --- executables -----------------------------------------------------------
 add_executable(trellis-smoke src/smoke_test.cpp)

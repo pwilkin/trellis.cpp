@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cfloat>
+#include <ctime>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -12,6 +13,22 @@
 
 #ifdef TRELLIS_HAVE_WEBP
 #include <webp/encode.h>
+#endif
+
+#ifndef TRELLIS_GIT_COMMIT
+#define TRELLIS_GIT_COMMIT ""
+#endif
+
+#ifndef TRELLIS_GIT_DIRTY
+#define TRELLIS_GIT_DIRTY 0
+#endif
+
+#ifndef TRELLIS_BUILD_BACKEND
+#define TRELLIS_BUILD_BACKEND ""
+#endif
+
+#ifndef TRELLIS_BUILD_TIMESTAMP
+#define TRELLIS_BUILD_TIMESTAMP ""
 #endif
 
 namespace trellis {
@@ -24,6 +41,81 @@ static void png_collect(void* ctx, void* data, int size) {
 static void w_u32(std::vector<uint8_t>& o, uint32_t v) {
     o.push_back(v & 0xff); o.push_back((v >> 8) & 0xff);
     o.push_back((v >> 16) & 0xff); o.push_back((v >> 24) & 0xff);
+}
+
+static std::string generated_timestamp_utc() {
+    std::time_t now = std::time(nullptr);
+    std::tm tm_utc{};
+#if defined(_WIN32)
+    gmtime_s(&tm_utc, &now);
+#else
+    gmtime_r(&now, &tm_utc);
+#endif
+    char buf[32];
+    if (std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm_utc) == 0) {
+        return std::string();
+    }
+    return std::string(buf);
+}
+
+static std::string asset_extras_json(int64_t seed) {
+    std::string extras;
+    const bool have_commit = TRELLIS_GIT_COMMIT[0] != 0;
+    const bool have_dirty = TRELLIS_GIT_DIRTY != 0;
+    const bool have_backend = TRELLIS_BUILD_BACKEND[0] != 0;
+    const bool have_timestamp = TRELLIS_BUILD_TIMESTAMP[0] != 0;
+    const std::string generated = generated_timestamp_utc();
+    const bool have_generated = !generated.empty();
+    if (seed < 0 && !have_commit && !have_dirty && !have_backend && !have_timestamp && !have_generated) {
+        return extras;
+    }
+
+    extras = ",\"extras\":{";
+    bool first = true;
+    auto append_sep = [&]() {
+        if (!first) {
+            extras.push_back(',');
+        }
+        first = false;
+    };
+
+    if (seed >= 0) {
+        char seed_buf[64];
+        std::snprintf(seed_buf, sizeof(seed_buf), "\"seed\":%lld", (long long) seed);
+        append_sep();
+        extras += seed_buf;
+    }
+    if (have_commit) {
+        append_sep();
+        extras += "\"commit\":\"";
+        extras += TRELLIS_GIT_COMMIT;
+        extras += "\"";
+    }
+    if (have_dirty) {
+        append_sep();
+        extras += "\"dirty\":true";
+    }
+    if (have_backend) {
+        append_sep();
+        extras += "\"backend\":\"";
+        extras += TRELLIS_BUILD_BACKEND;
+        extras += "\"";
+    }
+    if (have_timestamp) {
+        append_sep();
+        extras += "\"build\":\"";
+        extras += TRELLIS_BUILD_TIMESTAMP;
+        extras += "\"";
+    }
+    if (have_generated) {
+        append_sep();
+        extras += "\"generated\":\"";
+        extras += generated;
+        extras += "\"";
+    }
+
+    extras += "}";
+    return extras;
 }
 
 bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* faces, int64_t F,
@@ -54,11 +146,9 @@ bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* f
         std::snprintf(bv2, sizeof(bv2), ",{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34962}", posBytes + idxBytes, colBytes);
     } else { attr[0]=0; acc2[0]=0; bv2[0]=0; std::snprintf(attr, sizeof(attr), "\"POSITION\":0"); }
 
-    char seed_json[96];
-    if (seed >= 0) std::snprintf(seed_json, sizeof(seed_json), ",\"extras\":{\"seed\":%lld}", (long long)seed);
-    else seed_json[0] = 0;
+    const std::string asset_meta = asset_extras_json(seed);
 
-    char buf[2048];
+    char buf[4096];
     std::snprintf(buf, sizeof(buf),
         "{\"asset\":{\"version\":\"2.0\",\"generator\":\"trellis.cpp\"%s},"
         "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}],"
@@ -71,7 +161,7 @@ bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* f
         "{\"buffer\":0,\"byteOffset\":0,\"byteLength\":%u,\"target\":34962},"
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34963}%s],"
         "\"buffers\":[{\"byteLength\":%u}]}",
-        seed_json, attr, (long long)V, mn[0], mn[1], mn[2], mx[0], mx[1], mx[2],
+        asset_meta.c_str(), attr, (long long)V, mn[0], mn[1], mn[2], mx[0], mx[1], mx[2],
         (long long)(F * 3), acc2, posBytes, posBytes, idxBytes, bv2, posBytes + idxBytes + colBytes);
     std::string json(buf);
     while (json.size() % 4 != 0) json.push_back(' ');
@@ -151,11 +241,9 @@ bool write_glb_textured(const char* path, const float* verts, int64_t V, const f
     bin.insert(bin.end(), pngB.begin(), pngB.end()); pad4(bin); const uint32_t off5=(uint32_t)bin.size();
     bin.insert(bin.end(), pngM.begin(), pngM.end()); pad4(bin);
 
-    char seed_json[96];
-    if (seed >= 0) std::snprintf(seed_json, sizeof(seed_json), ",\"extras\":{\"seed\":%lld}", (long long)seed);
-    else seed_json[0] = 0;
+    const std::string asset_meta = asset_extras_json(seed);
 
-    char buf[3000];
+    char buf[4096];
     std::snprintf(buf,sizeof(buf),
         "{\"asset\":{\"version\":\"2.0\",\"generator\":\"trellis.cpp\"%s},"
         "%s"
@@ -178,7 +266,7 @@ bool write_glb_textured(const char* path, const float* verts, int64_t V, const f
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u},"
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u}],"
         "\"buffers\":[{\"byteLength\":%u}]}",
-        seed_json,
+        asset_meta.c_str(),
         webp ? "\"extensionsUsed\":[\"EXT_texture_webp\"],\"extensionsRequired\":[\"EXT_texture_webp\"]," : "",
         double_sided ? "true" : "false",
         webp ? "\"textures\":[{\"sampler\":0,\"extensions\":{\"EXT_texture_webp\":{\"source\":0}}},{\"sampler\":0,\"extensions\":{\"EXT_texture_webp\":{\"source\":1}}}],"
