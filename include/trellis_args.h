@@ -28,7 +28,11 @@ struct TrellisParams {
     int  hr_res     = 1024;     // HR cascade target resolution (1024 / 1536)
     int  max_tokens = 49152;    // HR token budget (backoff floors at 1024)
 
-    bool birefnet = false;      // BiRefNet bg removal (else white-background threshold)
+    int birefnet = -1;          // bg removal: 1 BiRefNet, 0 white-threshold, -1 auto
+                                // (auto: keep a pre-matted image's alpha; else BiRefNet when
+                                // birefnet.gguf is present; threshold as last resort. The
+                                // threshold matte reads specular highlights [min(RGB)>=232]
+                                // as background and the model then generates holes there.)
     bool texture  = true;       // texture flow + UV bake (else geometry-only)
     bool xatlas   = true;       // xatlas UV unwrap (else voxel-native box projection)
     int  decim    = -1;         // decimation cluster grid   (-1 => per-cascade default)

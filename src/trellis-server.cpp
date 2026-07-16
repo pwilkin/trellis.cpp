@@ -80,7 +80,7 @@ int main(int argc, char** argv) {
         trellis::TrellisParams p = base;
         if (req.has_file("seed")) p.seed = (uint32_t) atoi(req.get_file_value("seed").content.c_str());
         if (req.has_file("resolution")) p.set_res(atoi(req.get_file_value("resolution").content.c_str()));
-        if (req.has_file("bg_removal")) p.birefnet = (req.get_file_value("bg_removal").content == "birefnet");
+        if (req.has_file("bg_removal")) p.birefnet = (req.get_file_value("bg_removal").content == "birefnet") ? 1 : 0;
         if (req.has_file("uv")) p.xatlas = (req.get_file_value("uv").content == "xatlas");
 
         const std::string stem = temp_stem();
@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
             }
             fprintf(stderr, "[trellis-server] generate: %zu-byte image, seed %u, res %s, bg %s, uv %s\n",
                     image.content.size(), p.seed, p.cascade ? std::to_string(p.hr_res).c_str() : "512",
-                    p.birefnet ? "birefnet" : "threshold", p.xatlas ? "xatlas" : "box");
+                    p.birefnet < 0 ? "auto" : (p.birefnet ? "birefnet" : "threshold"), p.xatlas ? "xatlas" : "box");
             try {
                 int rc = trellis_run(p);
                 if (rc == 0) glb = read_file_bytes(p.output);

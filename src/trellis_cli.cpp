@@ -72,7 +72,22 @@ int trellis_run(const trellis::TrellisParams& cfg) {
     auto noise = [&](size_t n){ vector<float> v(n); for (auto& x : v) x = randn(rng); return v; };
     double t0 = now();
 
-    const bool birefnet = cfg.birefnet;
+    bool birefnet = cfg.birefnet == 1;
+    if (cfg.birefnet < 0) {
+        // Auto bg-removal. A pre-matted image keeps its own alpha (threshold path uses it
+        // as-is). Otherwise prefer the neural matte: the white-threshold rule reads specular
+        // highlights (min(RGB)>=232) as background, and conditioning the flow on an object
+        // with punched-out highlights makes it generate HOLES right there (issue #1
+        // follow-ups: helmet-crest and axe-edge highlights on assets/goblin.png).
+        if (trellis::image_has_alpha(img)) {
+            birefnet = false;
+        } else {
+            FILE* bf = fopen((M + "/birefnet.gguf").c_str(), "rb");
+            if (bf) { fclose(bf); birefnet = true; }
+            else printf("      (birefnet.gguf not found -- falling back to threshold matte;"
+                        " bright highlights may punch holes)\n");
+        }
+    }
     vector<float> chw, chw1024;
     if (birefnet) {
         printf("[1/6] preprocess %s (BiRefNet bg removal, %s)\n", img.c_str(), cascade ? "1024 cascade" : "512");

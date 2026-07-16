@@ -9,6 +9,10 @@ struct Model;
 // Returns [3*S*S] float in torch CHW order (== ggml [S,S,3,1]), or empty on failure.
 std::vector<float> preprocess_image(const std::string& path, int S = 512);
 
+// True when the image carries a real (not all-opaque) alpha channel, i.e. it is
+// pre-matted and needs no background removal.
+bool image_has_alpha(const std::string& path);
+
 // BiRefNet background removal: run the matte, bbox-crop, premultiply -> square RGB uint8 cutout
 // (size returned in `sz`). bm = loaded birefnet model, gpu = device for the deform kernel.
 std::vector<unsigned char> birefnet_cutout(const std::string& path, const Model& bm, int gpu, int& sz);

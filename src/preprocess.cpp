@@ -45,6 +45,16 @@ static std::vector<unsigned char> alpha_to_cutout(const unsigned char* rgba, int
     return crop;
 }
 
+bool image_has_alpha(const std::string& path) {
+    int W, H, ch;
+    unsigned char* img = stbi_load(path.c_str(), &W, &H, &ch, 4);
+    if (!img) return false;
+    bool has_alpha = false;
+    for (size_t i = 0; i < (size_t)W * H; ++i) if (img[4*i+3] < 250) { has_alpha = true; break; }
+    stbi_image_free(img);
+    return has_alpha;
+}
+
 std::vector<float> preprocess_image(const std::string& path, int S) {
     int W, H, ch;
     unsigned char* img = stbi_load(path.c_str(), &W, &H, &ch, 4);   // force RGBA
