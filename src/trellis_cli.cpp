@@ -226,6 +226,17 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         mesh = trellis::dual_grid_to_mesh(so);
     }
     printf("      mesh V=%d F=%d\n", mesh.V(), mesh.F());
+    {   // reference postprocess fills small holes BEFORE the remesh (max_hole_perimeter=3e-2):
+        // open cracks make the narrow-band in/out test ambiguous and leak holes into the
+        // remeshed surface (ours had ~30x the reference's boundary edges without this).
+        const int nh = trellis::fill_holes(mesh.verts, mesh.faces, 3e-2f);
+        if (nh) printf("      filled %d small holes -> V=%d F=%d\n", nh, mesh.V(), mesh.F());
+    }
+    if (const char* dp = std::getenv("TRELLIS_DUMP_DECMESH")) {   // pre-remesh decoded mesh (int V,F,verts,faces) for remesh A/B
+        FILE* f = fopen(dp, "wb"); if (f) { int v=mesh.V(), fc=mesh.F();
+            fwrite(&v,4,1,f); fwrite(&fc,4,1,f); fwrite(mesh.verts.data(),4,mesh.verts.size(),f); fwrite(mesh.faces.data(),4,mesh.faces.size(),f); fclose(f);
+            printf("      [dump] pre-remesh mesh -> %s\n", dp); fflush(stdout); }
+    }
 
     vector<float> colors, pbr6;   // colors = base RGB (PLY); pbr6 = per-vertex [V*6] for UV bake
     trellis::ShapeOut so_tex;                                    // res-512 tex-guide decode (mixed-res path)

@@ -59,6 +59,14 @@ void decimate_qem(const std::vector<float>& verts, int V, const std::vector<int3
 // (a hollow vase's inner+outer surface). In place; returns the number of components dropped.
 int drop_small_components(std::vector<float>& verts, std::vector<int32_t>& faces, float frac = 0.02f);
 
+// Fill small boundary loops (holes) with a centroid fan, port of CuMesh fill_holes
+// (clean_up.cu): loops whose perimeter is below max_perimeter get one new vertex at the
+// mean of their edge midpoints plus one triangle per rim edge. The reference postprocess
+// runs this on the decoded mesh BEFORE the remesh (max_hole_perimeter=3e-2 in the
+// [-0.5,0.5] world cube) -- open cracks make the narrow-band in/out test ambiguous and
+// leak holes into the remeshed surface. In place; returns the number of holes filled.
+int fill_holes(std::vector<float>& verts, std::vector<int32_t>& faces, float max_perimeter = 3e-2f);
+
 // Taubin (lambda/mu) shrink-free Laplacian smoothing. Strips the ~1-voxel stair-step noise
 // of the dual-contour surface so the quadric simplifier stays curvature-adaptive instead of
 // emitting a uniform-dense sliver mesh. Boundary verts pinned. In place.

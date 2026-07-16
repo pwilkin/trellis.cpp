@@ -491,6 +491,70 @@ int drop_small_components(std::vector<float>& verts, std::vector<int32_t>& faces
     return dropped;
 }
 
+// Fill small boundary loops with a centroid fan (port of CuMesh clean_up.cu fill_holes).
+// A boundary edge is a directed face edge (u,v) with no opposing (v,u); rim cycles are
+// walked in reverse face direction (v->u keeps the new fan's winding consistent with the
+// neighbouring faces). Loops with perimeter < max_perimeter gain one vertex at the mean
+// of their edge midpoints (== CuMesh's segmented midpoint average) and a triangle per rim
+// edge. Non-manifold rim junctions or non-closing walks leave that loop unfilled.
+int fill_holes(std::vector<float>& verts, std::vector<int32_t>& faces, float max_perimeter) {
+    const size_t F = faces.size() / 3;
+    if (F == 0) return 0;
+    // count undirected edge uses; remember one directed representative
+    std::unordered_map<uint64_t, std::pair<int,uint64_t>> euse;   // key -> {count, directed (u<<32|v)}
+    euse.reserve(F * 3);
+    auto ekey = [](int a, int b) -> uint64_t { if (a > b) { int t = a; a = b; b = t; } return ((uint64_t)(uint32_t)a << 32) | (uint32_t)b; };
+    for (size_t f = 0; f < F; ++f) {
+        const int32_t* t = &faces[3*f];
+        for (int k = 0; k < 3; ++k) {
+            const int u = t[k], v = t[(k+1)%3];
+            auto& e = euse[ekey(u, v)];
+            ++e.first; e.second = ((uint64_t)(uint32_t)u << 32) | (uint32_t)v;
+        }
+    }
+    // rim successor map: boundary edge (u,v) is traversed v->u, so nxt[v] = u
+    std::unordered_map<int,int> nxt;
+    for (auto& kv : euse)
+        if (kv.second.first == 1) {
+            const int u = (int)(kv.second.second >> 32), v = (int)(kv.second.second & 0xFFFFFFFF);
+            if (!nxt.emplace(v, u).second) nxt[v] = INT32_MIN;   // non-manifold junction: poison
+        }
+    int filled = 0;
+    std::unordered_map<int,char> visited;
+    std::vector<int> loop;
+    for (auto& kv : nxt) {
+        const int start = kv.first;
+        if (kv.second == INT32_MIN || visited.count(start)) continue;
+        loop.clear();
+        int cur = start; bool ok = true;
+        double perim = 0.0;
+        while (true) {
+            loop.push_back(cur);
+            auto it = nxt.find(cur);
+            if (it == nxt.end() || it->second == INT32_MIN || (int)loop.size() > (int)nxt.size()) { ok = false; break; }
+            const int n = it->second;
+            const float* a = &verts[3*(size_t)cur]; const float* b = &verts[3*(size_t)n];
+            perim += std::sqrt((double)(a[0]-b[0])*(a[0]-b[0]) + (double)(a[1]-b[1])*(a[1]-b[1]) + (double)(a[2]-b[2])*(a[2]-b[2]));
+            cur = n;
+            if (cur == start) break;
+        }
+        for (int v : loop) visited[v] = 1;
+        if (!ok || loop.size() < 3 || perim >= max_perimeter) continue;
+        // centroid = mean of rim edge midpoints (uniform over edges; each vertex is in 2 edges
+        // of the cycle, so this equals the mean of the loop vertices)
+        double c[3] = {0, 0, 0};
+        for (int v : loop) for (int k = 0; k < 3; ++k) c[k] += verts[3*(size_t)v + k];
+        const int cid = (int)(verts.size() / 3);
+        for (int k = 0; k < 3; ++k) verts.push_back((float)(c[k] / loop.size()));
+        for (size_t i = 0; i < loop.size(); ++i) {
+            const int v = loop[i], u = loop[(i+1) % loop.size()];   // rim direction v->u
+            faces.push_back(v); faces.push_back(u); faces.push_back(cid);
+        }
+        ++filled;
+    }
+    return filled;
+}
+
 // Taubin (lambda/mu) shrink-free Laplacian smoothing over the shared-vertex mesh. The
 // dual-contour surface carries ~1-voxel stair-step noise; a quadric simplifier sees that
 // as "curvature everywhere" and produces a uniform-dense sliver mesh instead of an
@@ -820,26 +884,14 @@ BakedMesh uv_bake(const std::vector<float>& verts, int V, const std::vector<int3
     if (vox && vox->ok()) vs.reset(new VoxSampler(*vox));
     const int res = (vox && vox->ok()) ? vox->res : 1024;
 
-    // --- L1: duplicate faces create false planar regions and z-fighting
-    // geometry; they are dropped outright. (Slivers are charted normally: the
-    // normal-cone cluster cap below already bounds xatlas's quadratic growth,
-    // and post-simplification slivers are long, visible triangles that need
-    // real UVs.)
+    // --- L1 (soup only, see below): duplicate-face marking. On voxel soup,
+    // coincident faces create false planar regions and z-fighting geometry. On
+    // a remeshed watertight mesh, dropping one copy of a coincident pair opens
+    // boundary cracks (odd edge parity) and can keep the inward-facing copy --
+    // which backface-culls on the single-sided export and reads as a HOLE. The
+    // reference charts duplicates as-is in its remesh branch, so we do too.
     std::vector<uint8_t> sliver((size_t)F, 0);
     int n_sliver = 0, n_dup = 0;
-    {
-        std::unordered_map<uint64_t, uint8_t> seen;
-        seen.reserve((size_t)F * 2);
-        for (int f = 0; f < F; ++f) {
-            int a = faces[3*f], b = faces[3*f+1], c = faces[3*f+2];
-            int s0 = std::min({a,b,c}), s2 = std::max({a,b,c}), s1 = a + b + c - s0 - s2;
-            const uint64_t k = ((uint64_t)(uint32_t)s0 * 0x9E3779B97F4A7C15ull) ^
-                               ((uint64_t)(uint32_t)s1 * 0xC2B2AE3D27D4EB4Full) ^
-                               ((uint64_t)(uint32_t)s2 * 0x165667B19E3779F9ull);
-            auto ins = seen.emplace(k, 1);
-            if (!ins.second) { sliver[f] = 1; ++n_dup; continue; }
-        }
-    }
 
     // --- L2: component triage. Sub-voxel greeble components would each pay
     // xatlas's full per-component overhead (the ~100k-component spray is a
@@ -883,6 +935,19 @@ BakedMesh uv_bake(const std::vector<float>& verts, int V, const std::vector<int3
     // stripping them out both wastes atlas area and opens welded-boundary
     // cracks, so triage engages only on soup-scale component counts.
     const bool soup = cstat.size() > 2000;
+    if (soup) {   // L1 duplicate-face drop (see comment above): soup-scale meshes only
+        std::unordered_map<uint64_t, uint8_t> seen;
+        seen.reserve((size_t)F * 2);
+        for (int f = 0; f < F; ++f) {
+            int a = faces[3*f], b = faces[3*f+1], c = faces[3*f+2];
+            int s0 = std::min({a,b,c}), s2 = std::max({a,b,c}), s1 = a + b + c - s0 - s2;
+            const uint64_t k = ((uint64_t)(uint32_t)s0 * 0x9E3779B97F4A7C15ull) ^
+                               ((uint64_t)(uint32_t)s1 * 0xC2B2AE3D27D4EB4Full) ^
+                               ((uint64_t)(uint32_t)s2 * 0x165667B19E3779F9ull);
+            auto ins = seen.emplace(k, 1);
+            if (!ins.second) { sliver[f] = 1; ++n_dup; continue; }
+        }
+    }
     std::vector<uint8_t> comp_tiny(cstat.size(), 0);
     double area_big = 0, area_tiny = 0;
     for (size_t c = 0; c < cstat.size(); ++c) {
