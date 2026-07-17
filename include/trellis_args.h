@@ -18,6 +18,7 @@ extern bool g_require_gpu;      // defined in trellis_model.cpp (TRELLIS_REQUIRE
 struct TrellisParams {
     std::string image;                                          // input image (image->3D)
     std::string output = "model.glb";                           // output .glb
+    std::string copyright;                                      // glTF asset.copyright metadata
     std::string models = "/media/ilintar/D_SSD/models/trellis2/gguf";
     std::string host   = "127.0.0.1";                           // trellis-server only
     int      port = 8080;                                       // trellis-server only

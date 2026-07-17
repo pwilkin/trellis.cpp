@@ -408,7 +408,8 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         if (bm.ok()) {
             trellis::write_glb_textured(outglb.c_str(), bm.verts.data(), (int64_t)bm.verts.size()/3, bm.uv.data(),
                                         bm.faces.data(), (int64_t)bm.faces.size()/3, bm.base.data(), bm.mr.data(), bm.T,
-                                        /*double_sided=*/rm.F() == 0, run_seed);
+                                        /*double_sided=*/rm.F() == 0, run_seed,
+                                        cfg.copyright.empty() ? nullptr : cfg.copyright.c_str());
             std::string tex = outglb.substr(0, outglb.find_last_of('.')) + "_base.png";
             stbi_write_png(tex.c_str(), bm.T, bm.T, 4, bm.base.data(), bm.T*4);
             textured = true;
@@ -416,7 +417,9 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         } else printf("      uv_bake failed; falling back to vertex colors\n");
     }
     if (!textured)
-        trellis::write_glb(outglb.c_str(), mesh.verts.data(), mesh.V(), mesh.faces.data(), mesh.F(), colors.empty() ? nullptr : colors.data(), run_seed);
+        trellis::write_glb(outglb.c_str(), mesh.verts.data(), mesh.V(), mesh.faces.data(), mesh.F(),
+                           colors.empty() ? nullptr : colors.data(), run_seed,
+                           cfg.copyright.empty() ? nullptr : cfg.copyright.c_str());
     std::string ply = outglb.substr(0, outglb.find_last_of('.')) + ".ply";
     trellis::write_ply(ply.c_str(), mesh.verts.data(), mesh.V(), mesh.faces.data(), mesh.F(), colors.empty() ? nullptr : colors.data());
     printf("done in %.1fs -> %s (+ %s)\n", now() - t0, outglb.c_str(), ply.c_str());

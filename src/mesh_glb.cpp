@@ -10,6 +10,13 @@
 #include <array>
 #include <unordered_map>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
@@ -31,6 +38,10 @@
 
 #ifndef TRELLIS_BUILD_TIMESTAMP
 #define TRELLIS_BUILD_TIMESTAMP ""
+#endif
+
+#ifndef TRELLIS_APP_VERSION
+#define TRELLIS_APP_VERSION ""
 #endif
 
 namespace trellis {
@@ -120,8 +131,86 @@ static std::string asset_extras_json(int64_t seed) {
     return extras;
 }
 
+static std::string generator_label() {
+    if (TRELLIS_APP_VERSION[0] == 0) {
+        return "trellis.cpp";
+    }
+    std::string g = "trellis.cpp ";
+    g += TRELLIS_APP_VERSION;
+    return g;
+}
+
+static std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char ch : s) {
+        switch (ch) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (ch < 0x20) {
+                    char buf[7];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", (unsigned int)ch);
+                    out += buf;
+                } else {
+                    out.push_back((char)ch);
+                }
+                break;
+        }
+    }
+    return out;
+}
+
+static std::string normalize_cli_text_utf8(const char* s) {
+    if (!s || !s[0]) {
+        return std::string();
+    }
+#if defined(_WIN32)
+    int wlen = MultiByteToWideChar(CP_ACP, 0, s, -1, nullptr, 0);
+    if (wlen <= 1) {
+        return std::string(s);
+    }
+
+    std::wstring w((size_t) wlen, L'\0');
+    if (MultiByteToWideChar(CP_ACP, 0, s, -1, &w[0], wlen) <= 0) {
+        return std::string(s);
+    }
+
+    int u8len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (u8len <= 1) {
+        return std::string(s);
+    }
+
+    std::string u8((size_t) u8len, '\0');
+    if (WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &u8[0], u8len, nullptr, nullptr) <= 0) {
+        return std::string(s);
+    }
+    if (!u8.empty() && u8.back() == '\0') {
+        u8.pop_back();
+    }
+    return u8;
+#else
+    return std::string(s);
+#endif
+}
+
+static std::string asset_copyright_json(const char* copyright) {
+    if (!copyright || !copyright[0]) {
+        return std::string();
+    }
+    std::string s = ",\"copyright\":\"";
+    s += json_escape(normalize_cli_text_utf8(copyright));
+    s += "\"";
+    return s;
+}
+
 bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* faces, int64_t F,
-               const float* colors, int64_t seed) {
+               const float* colors, int64_t seed, const char* copyright) {
     // 1. rotate (x,y,z)->(x,z,-y); track min/max
     std::vector<float> pos((size_t)V * 3);
     float mn[3] = { FLT_MAX, FLT_MAX, FLT_MAX }, mx[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
@@ -149,10 +238,12 @@ bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* f
     } else { attr[0]=0; acc2[0]=0; bv2[0]=0; std::snprintf(attr, sizeof(attr), "\"POSITION\":0"); }
 
     const std::string asset_meta = asset_extras_json(seed);
+    const std::string generator = generator_label();
+    const std::string asset_copyright = asset_copyright_json(copyright);
 
     char buf[4096];
     std::snprintf(buf, sizeof(buf),
-        "{\"asset\":{\"version\":\"2.0\",\"generator\":\"trellis.cpp\"%s},"
+        "{\"asset\":{\"version\":\"2.0\",\"minVersion\":\"2.0\",\"generator\":\"%s\"%s%s},"
         "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}],"
         "\"meshes\":[{\"primitives\":[{\"attributes\":{%s},\"indices\":1,\"mode\":4}]}],"
         "\"accessors\":["
@@ -163,7 +254,7 @@ bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* f
         "{\"buffer\":0,\"byteOffset\":0,\"byteLength\":%u,\"target\":34962},"
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34963}%s],"
         "\"buffers\":[{\"byteLength\":%u}]}",
-        asset_meta.c_str(), attr, (long long)V, mn[0], mn[1], mn[2], mx[0], mx[1], mx[2],
+        generator.c_str(), asset_copyright.c_str(), asset_meta.c_str(), attr, (long long)V, mn[0], mn[1], mn[2], mx[0], mx[1], mx[2],
         (long long)(F * 3), acc2, posBytes, posBytes, idxBytes, bv2, posBytes + idxBytes + colBytes);
     std::string json(buf);
     while (json.size() % 4 != 0) json.push_back(' ');
@@ -187,7 +278,7 @@ bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* f
 bool write_glb_textured(const char* path, const float* verts, int64_t V, const float* uv,
                         const int32_t* faces, int64_t F,
                         const unsigned char* base_rgba, const unsigned char* mr_rgba, int T,
-                        bool double_sided, int64_t seed) {
+                        bool double_sided, int64_t seed, const char* copyright) {
     // rotate positions (x,z,-y) + min/max
     std::vector<float> pos((size_t)V*3);
     float mn[3]={FLT_MAX,FLT_MAX,FLT_MAX}, mx[3]={-FLT_MAX,-FLT_MAX,-FLT_MAX};
@@ -271,10 +362,12 @@ bool write_glb_textured(const char* path, const float* verts, int64_t V, const f
     bin.insert(bin.end(), pngM.begin(), pngM.end()); pad4(bin);
 
     const std::string asset_meta = asset_extras_json(seed);
+    const std::string generator = generator_label();
+    const std::string asset_copyright = asset_copyright_json(copyright);
 
     char buf[4096];
     std::snprintf(buf,sizeof(buf),
-        "{\"asset\":{\"version\":\"2.0\",\"generator\":\"trellis.cpp\"%s},"
+        "{\"asset\":{\"version\":\"2.0\",\"minVersion\":\"2.0\",\"generator\":\"%s\"%s%s},"
         "%s"
         "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}],"
         "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"TEXCOORD_0\":2},\"indices\":3,\"material\":0,\"mode\":4}]}],"
@@ -295,7 +388,7 @@ bool write_glb_textured(const char* path, const float* verts, int64_t V, const f
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u},"
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u}],"
         "\"buffers\":[{\"byteLength\":%u}]}",
-        asset_meta.c_str(),
+        generator.c_str(), asset_copyright.c_str(), asset_meta.c_str(),
         webp ? "\"extensionsUsed\":[\"EXT_texture_webp\"],\"extensionsRequired\":[\"EXT_texture_webp\"]," : "",
         double_sided ? "true" : "false",
         webp ? "\"textures\":[{\"sampler\":0,\"extensions\":{\"EXT_texture_webp\":{\"source\":0}}},{\"sampler\":0,\"extensions\":{\"EXT_texture_webp\":{\"source\":1}}}],"
