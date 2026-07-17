@@ -22,6 +22,7 @@ void print_usage(const char* argv0, bool server) {
         "\n"
         "  -i, --image PATH        input image                  (image->3D)\n"
         "  -o, --output PATH       output .glb                  (default model.glb)\n"
+        "      --copyright TEXT    glTF asset.copyright metadata\n"
         "  -m, --models DIR        GGUF model directory\n"
         "      --gpu N             GPU index, <0 = CPU          (default 0)\n"
         "  -s, --seed N            RNG seed                     (default 42)\n"
@@ -67,6 +68,7 @@ bool parse_args(int argc, char** argv, TrellisParams& p) {
         if      (a == "-h" || a == "--help")    { p.help = true; return false; }
         else if (a == "-i" || a == "--image")   { const char* v = need(a.c_str()); if (!v) return false; p.image = v; }
         else if (a == "-o" || a == "--output")  { const char* v = need(a.c_str()); if (!v) return false; p.output = v; }
+        else if (a == "--copyright")            { const char* v = need(a.c_str()); if (!v) return false; p.copyright = v; }
         else if (a == "-m" || a == "--models")  { const char* v = need(a.c_str()); if (!v) return false; p.models = v; }
         else if (a == "--gpu")                  { const char* v = need(a.c_str()); if (!v) return false; p.gpu = atoi(v); }
         else if (a == "-s" || a == "--seed")    { const char* v = need(a.c_str()); if (!v) return false; p.seed = (uint32_t)atoi(v); }
