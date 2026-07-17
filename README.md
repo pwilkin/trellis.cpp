@@ -17,6 +17,31 @@ Prebuilt binaries for Linux and Windows (Vulkan, ROCm, CUDA) are published on th
 [releases page](../../releases). Serves as the `trellis` backend of
 [Lemonade](https://github.com/lemonade-sdk/lemonade).
 
+## Showcase
+
+Seven image→3D reconstructions produced end-to-end by trellis.cpp **v0.4.3** on a
+single Radeon 8060S (all res-1024 cascade, seed 42, ~300K faces, 2048² atlas; the
+GLBs and their Z-Image-Turbo source images live in
+[`assets/showcase/`](assets/showcase/)):
+
+<p>
+<a href="assets/showcase/axe/axe_quad4k.png"><img src="assets/showcase/axe/axe_quad4k.png" width="49%"></a>
+<a href="assets/showcase/chest/chest_quad4k.png"><img src="assets/showcase/chest/chest_quad4k.png" width="49%"></a>
+<a href="assets/showcase/cottage/cottage_quad4k.png"><img src="assets/showcase/cottage/cottage_quad4k.png" width="49%"></a>
+<a href="assets/showcase/drone/drone_quad4k.png"><img src="assets/showcase/drone/drone_quad4k.png" width="49%"></a>
+<a href="assets/showcase/golem/golem_quad4k.png"><img src="assets/showcase/golem/golem_quad4k.png" width="49%"></a>
+<a href="assets/showcase/knight/knight_quad4k.png"><img src="assets/showcase/knight/knight_quad4k.png" width="49%"></a>
+<a href="assets/showcase/racer/racer_quad4k.png"><img src="assets/showcase/racer/racer_quad4k.png" width="49%"></a>
+</p>
+
+Each grid is a 4096×4096 four-view capture — front / right / back / left at 75°
+elevation, 2048² per view — made with
+[`tools/mv_preview/render_quad.js`](tools/mv_preview/render_quad.js), a headless
+Playwright driver around Google's `<model-viewer>`: it serves
+`tools/mv_preview/quad.html`, loads the GLB into a 2×2 grid of viewers, waits for
+auto-framing to settle, captures each view via `toBlob`, and
+[`stitch_quad.py`](tools/mv_preview/stitch_quad.py) assembles the final grid.
+
 ## Usage
 
 The default is the **1024 cascade** (LR `flow_512` → upsample → HR `flow_1024` →
@@ -27,7 +52,7 @@ The most useful ones:
 | flag | effect |
 |------|--------|
 | `--res 512\|1024\|1536` | geometry resolution (512 = light path, no cascade) |
-| `--bg-removal threshold\|birefnet` | white-bg keyer vs. full BiRefNet matte (for photos with real backgrounds, ~13s on GPU) |
+| `--bg-removal threshold\|birefnet` | default **auto**: pre-matted images keep their alpha, otherwise the BiRefNet matte (~13s on GPU). The plain white-bg keyer cuts specular highlights out of the alpha — the flow then generates holes there — so it is opt-in only |
 | `--no-texture` | geometry only |
 | `--decim GRID` | legacy cluster-grid decimation (default: quadric simplify to 300K faces @1024 / 150K @512; `0` = keep the full-res mesh) |
 | `--atlas PX` | UV atlas size (default 2048 @1024 / 1024 @512) |

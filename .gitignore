@@ -24,5 +24,6 @@ __pycache__/
 # scratch
 /out/
 *.glb
+!assets/showcase/*/*.glb
 *.tmp
 dumps/
