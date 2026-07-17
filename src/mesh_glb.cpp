@@ -33,6 +33,10 @@
 #define TRELLIS_BUILD_TIMESTAMP ""
 #endif
 
+#ifndef TRELLIS_APP_VERSION
+#define TRELLIS_APP_VERSION ""
+#endif
+
 namespace trellis {
 
 static void png_collect(void* ctx, void* data, int size) {
@@ -120,6 +124,15 @@ static std::string asset_extras_json(int64_t seed) {
     return extras;
 }
 
+static std::string generator_label() {
+    if (TRELLIS_APP_VERSION[0] == 0) {
+        return "trellis.cpp";
+    }
+    std::string g = "trellis.cpp ";
+    g += TRELLIS_APP_VERSION;
+    return g;
+}
+
 bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* faces, int64_t F,
                const float* colors, int64_t seed) {
     // 1. rotate (x,y,z)->(x,z,-y); track min/max
@@ -149,10 +162,11 @@ bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* f
     } else { attr[0]=0; acc2[0]=0; bv2[0]=0; std::snprintf(attr, sizeof(attr), "\"POSITION\":0"); }
 
     const std::string asset_meta = asset_extras_json(seed);
+    const std::string generator = generator_label();
 
     char buf[4096];
     std::snprintf(buf, sizeof(buf),
-        "{\"asset\":{\"version\":\"2.0\",\"generator\":\"trellis.cpp\"%s},"
+        "{\"asset\":{\"version\":\"2.0\",\"generator\":\"%s\"%s},"
         "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}],"
         "\"meshes\":[{\"primitives\":[{\"attributes\":{%s},\"indices\":1,\"mode\":4}]}],"
         "\"accessors\":["
@@ -163,7 +177,7 @@ bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* f
         "{\"buffer\":0,\"byteOffset\":0,\"byteLength\":%u,\"target\":34962},"
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34963}%s],"
         "\"buffers\":[{\"byteLength\":%u}]}",
-        asset_meta.c_str(), attr, (long long)V, mn[0], mn[1], mn[2], mx[0], mx[1], mx[2],
+        generator.c_str(), asset_meta.c_str(), attr, (long long)V, mn[0], mn[1], mn[2], mx[0], mx[1], mx[2],
         (long long)(F * 3), acc2, posBytes, posBytes, idxBytes, bv2, posBytes + idxBytes + colBytes);
     std::string json(buf);
     while (json.size() % 4 != 0) json.push_back(' ');
@@ -271,10 +285,11 @@ bool write_glb_textured(const char* path, const float* verts, int64_t V, const f
     bin.insert(bin.end(), pngM.begin(), pngM.end()); pad4(bin);
 
     const std::string asset_meta = asset_extras_json(seed);
+    const std::string generator = generator_label();
 
     char buf[4096];
     std::snprintf(buf,sizeof(buf),
-        "{\"asset\":{\"version\":\"2.0\",\"generator\":\"trellis.cpp\"%s},"
+        "{\"asset\":{\"version\":\"2.0\",\"generator\":\"%s\"%s},"
         "%s"
         "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}],"
         "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"TEXCOORD_0\":2},\"indices\":3,\"material\":0,\"mode\":4}]}],"
@@ -295,7 +310,7 @@ bool write_glb_textured(const char* path, const float* verts, int64_t V, const f
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u},"
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u}],"
         "\"buffers\":[{\"byteLength\":%u}]}",
-        asset_meta.c_str(),
+        generator.c_str(), asset_meta.c_str(),
         webp ? "\"extensionsUsed\":[\"EXT_texture_webp\"],\"extensionsRequired\":[\"EXT_texture_webp\"]," : "",
         double_sided ? "true" : "false",
         webp ? "\"textures\":[{\"sampler\":0,\"extensions\":{\"EXT_texture_webp\":{\"source\":0}}},{\"sampler\":0,\"extensions\":{\"EXT_texture_webp\":{\"source\":1}}}],"

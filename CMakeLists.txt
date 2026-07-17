@@ -12,6 +12,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(Git QUIET)
 set(TRELLIS_GIT_COMMIT "")
 set(TRELLIS_GIT_DIRTY 0)
+set(TRELLIS_APP_VERSION "v${PROJECT_VERSION}")
 string(TIMESTAMP TRELLIS_BUILD_TIMESTAMP_UTC "%Y-%m-%dT%H:%M:%SZ" UTC)
 if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
   execute_process(
@@ -34,6 +35,24 @@ if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
   else()
     set(TRELLIS_GIT_COMMIT "")
   endif()
+
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" tag --sort=-v:refname
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    OUTPUT_VARIABLE TRELLIS_GIT_TAGS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(NOT "${TRELLIS_GIT_TAGS}" STREQUAL "")
+    string(REPLACE "\n" ";" TRELLIS_GIT_TAG_LIST "${TRELLIS_GIT_TAGS}")
+    list(GET TRELLIS_GIT_TAG_LIST 0 TRELLIS_LATEST_TAG)
+    if(NOT "${TRELLIS_LATEST_TAG}" STREQUAL "")
+      set(TRELLIS_APP_VERSION "${TRELLIS_LATEST_TAG}")
+    endif()
+  endif()
+endif()
+
+if(NOT TRELLIS_APP_VERSION MATCHES "^v")
+  set(TRELLIS_APP_VERSION "v${TRELLIS_APP_VERSION}")
 endif()
 
 set(TRELLIS_BUILD_BACKEND "cpu")
@@ -89,7 +108,7 @@ add_library(trellis_core STATIC
   src/decimate_qem.cpp
 )
 target_include_directories(trellis_core PUBLIC include ${GGML_DIR}/include ${CMAKE_SOURCE_DIR}/thirdparty/stb ${CMAKE_SOURCE_DIR}/thirdparty/xatlas ${CMAKE_SOURCE_DIR}/thirdparty/meshoptimizer ${CMAKE_SOURCE_DIR}/thirdparty/fqms)
-target_compile_definitions(trellis_core PRIVATE TRELLIS_GIT_COMMIT="${TRELLIS_GIT_COMMIT}" TRELLIS_GIT_DIRTY=${TRELLIS_GIT_DIRTY} TRELLIS_BUILD_TIMESTAMP="${TRELLIS_BUILD_TIMESTAMP_UTC}")
+target_compile_definitions(trellis_core PRIVATE TRELLIS_GIT_COMMIT="${TRELLIS_GIT_COMMIT}" TRELLIS_GIT_DIRTY=${TRELLIS_GIT_DIRTY} TRELLIS_BUILD_TIMESTAMP="${TRELLIS_BUILD_TIMESTAMP_UTC}" TRELLIS_APP_VERSION="${TRELLIS_APP_VERSION}")
 target_link_libraries(trellis_core PUBLIC ggml ggml-base ggml-cpu)
 
 # --- WebP textures (reference-parity GLB export) ---------------------------
