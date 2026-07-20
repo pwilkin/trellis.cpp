@@ -32,7 +32,7 @@ That's it — launch **Trellis Studio**, drop in an image, and click **Generate 
 | server + runtime libs | `~/.local/share/trellis-studio/runtime/` | `%LOCALAPPDATA%\trellis-studio\runtime\` |
 | model weights (~16.5 GB) | `~/.local/share/trellis-studio/models/` | `%LOCALAPPDATA%\trellis-studio\models\` |
 | app config | `~/.config/trellis-studio/config.json` | `%APPDATA%\trellis-studio\config.json` |
-| desktop app | `.AppImage` in the install dir | installed via MSI (Start menu) |
+| desktop app | `.AppImage` in the install dir | installed via the setup .exe (Start menu) |
 
 ## Installer options
 

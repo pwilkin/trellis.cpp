@@ -300,7 +300,9 @@ jobs:
         run: |
           set -e
           base=app/src-tauri/target/release/bundle
-          msi=$(find "$base/msi" -name '*.msi' | head -1)
-          cp "$msi" trellis-studio-windows-x64.msi
+          # tauri.conf.json builds an NSIS installer (per-user, silent-installable)
+          exe=$(find "$base/nsis" -name '*-setup.exe' | head -1)
+          test -n "$exe" || { echo "NSIS installer not found under $base/nsis"; ls -R "$base" || true; exit 1; }
+          cp "$exe" trellis-studio-windows-x64-setup.exe
           gh release upload "${{ steps.tag.outputs.value }}" \
-            trellis-studio-windows-x64.msi --clobber --repo "${{ github.repository }}"
+            trellis-studio-windows-x64-setup.exe --clobber --repo "${{ github.repository }}"

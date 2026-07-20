@@ -45,9 +45,9 @@ Requires Node 20+, a Rust toolchain, and the Tauri v2 Linux deps
 ## Build
 
 ```bash
-npm run tauri build    # produces .deb + .AppImage (Linux) / .msi (Windows)
+npm run tauri build    # produces .deb + .AppImage (Linux) / NSIS setup .exe (Windows)
 ```
 
 CI (`.github/workflows/release.yml`, `studio` job) publishes these to each release
 as `trellis-studio-linux-x86_64.AppImage`, `trellis-studio-linux-amd64.deb`, and
-`trellis-studio-windows-x64.msi`, which the installers fetch by name.
+`trellis-studio-windows-x64-setup.exe`, which the installers fetch by name.

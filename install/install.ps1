@@ -116,13 +116,13 @@ if ($SkipApp) {
   Warn "skipping desktop app download (-SkipApp)."
 } else {
   Log "downloading Trellis Studio desktop app"
-  $msi = Join-Path $env:TEMP "trellis-studio-windows-x64.msi"
+  $setup = Join-Path $env:TEMP "trellis-studio-windows-x64-setup.exe"
   try {
-    Download "$RelBase/trellis-studio-windows-x64.msi" $msi
-    Info "launching installer (msiexec)"
-    Start-Process msiexec.exe -ArgumentList "/i", "`"$msi`"" -Wait
+    Download "$RelBase/trellis-studio-windows-x64-setup.exe" $setup
+    Info "launching installer (silent, per-user)"
+    Start-Process $setup -ArgumentList "/S" -Wait
   } catch {
-    Warn "app MSI not available on the latest release yet — skipping."
+    Warn "app installer not available on the latest release yet — skipping."
     Warn "You can still run the UI in a browser against trellis-server (see docs)."
   }
 }
