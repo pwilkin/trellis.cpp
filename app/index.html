@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Trellis Studio</title>
+    <!-- The vendored <model-viewer> (three.js-based) is loaded at runtime from
+         public/vendor by viewer.ts, so Vite doesn't try to bundle it. -->
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">◈</span> Trellis Studio
+      </div>
+      <div class="status">
+        <span id="backend-badge" class="badge" title="active backend">—</span>
+        <span id="server-dot" class="dot" title="server status"></span>
+        <span id="server-label" class="server-label">connecting…</span>
+        <button id="settings-btn" class="icon-btn" title="Settings">⚙</button>
+      </div>
+    </header>
+
+    <div id="setup-banner" class="banner hidden">
+      <span></span>
+      <button id="banner-settings" class="link-btn">Open settings</button>
+    </div>
+
+    <main class="workspace">
+      <section class="panel panel-left">
+        <div id="dropzone" class="dropzone" tabindex="0">
+          <img id="input-preview" class="input-preview hidden" alt="input" />
+          <div id="dropzone-hint" class="dropzone-hint">
+            <div class="dz-icon">⬆</div>
+            <div>Drop an image here</div>
+            <div class="muted">or click to browse</div>
+          </div>
+          <input id="file-input" type="file" accept="image/*" hidden />
+        </div>
+
+        <div class="controls">
+          <label class="ctl">
+            <span>Resolution</span>
+            <select id="ctl-res">
+              <option value="512">512 · light</option>
+              <option value="1024" selected>1024 · cascade</option>
+              <option value="1536">1536 · high</option>
+            </select>
+          </label>
+          <label class="ctl">
+            <span>Background removal</span>
+            <select id="ctl-bg">
+              <option value="auto" selected>auto</option>
+              <option value="birefnet">birefnet</option>
+              <option value="threshold">threshold</option>
+            </select>
+          </label>
+          <label class="ctl">
+            <span>UV unwrap</span>
+            <select id="ctl-uv">
+              <option value="xatlas" selected>xatlas</option>
+              <option value="box">box (faster)</option>
+            </select>
+          </label>
+          <label class="ctl">
+            <span>Seed</span>
+            <input id="ctl-seed" type="number" min="0" step="1" value="42" />
+          </label>
+        </div>
+
+        <button id="generate-btn" class="primary" disabled>Generate 3D</button>
+
+        <div id="progress" class="progress hidden">
+          <div class="bar"><div class="bar-fill"></div></div>
+          <div id="progress-stage" class="progress-stage muted">starting…</div>
+          <div id="progress-elapsed" class="progress-elapsed muted">0:00</div>
+          <button id="cancel-btn" class="link-btn">Cancel</button>
+        </div>
+      </section>
+
+      <section class="panel viewer-panel">
+        <div id="viewer-mount" class="viewer-mount"></div>
+        <div class="viewer-toolbar">
+          <button id="reset-view" class="tool-btn" disabled>Reset view</button>
+          <button id="save-glb" class="tool-btn" disabled>Save GLB…</button>
+          <span id="viewer-caption" class="viewer-caption muted"></span>
+        </div>
+      </section>
+    </main>
+
+    <section class="gallery-wrap">
+      <div class="gallery-head">
+        <span>Gallery</span>
+        <button id="clear-gallery" class="link-btn">Clear all</button>
+      </div>
+      <div id="gallery" class="gallery"></div>
+    </section>
+
+    <div id="settings-modal" class="modal hidden">
+      <div class="modal-card">
+        <div class="modal-head">
+          <span>Settings</span>
+          <button id="settings-close" class="icon-btn">✕</button>
+        </div>
+        <div id="settings-body" class="modal-body"></div>
+      </div>
+    </div>
+
+    <div id="toasts" class="toasts"></div>
+
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

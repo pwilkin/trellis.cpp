@@ -221,3 +221,86 @@ jobs:
         shell: bash
         run: |
           gh release upload "${{ steps.tag.outputs.value }}" "$ASSET" --clobber --repo "${{ github.repository }}"
+
+  # Trellis Studio desktop app (Tauri). Small, backend-agnostic installers that
+  # the install/ scripts fetch by these stable, version-less names:
+  #   trellis-studio-linux-x86_64.AppImage / trellis-studio-linux-amd64.deb
+  #   trellis-studio-windows-x64.msi
+  studio:
+    name: ${{ matrix.os }} · Trellis Studio app
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux,   runner: ubuntu-22.04 }
+          - { os: windows, runner: windows-2022 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      # Tauri v2 Linux system dependencies (webkit2gtk 4.1 stack).
+      - name: Linux system deps
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev libgtk-3-dev librsvg2-dev patchelf libappindicator3-dev file
+
+      - name: Build Trellis Studio
+        working-directory: app
+        run: |
+          npm ci
+          npm run tauri build
+
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "value=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package & upload (Linux)
+        if: matrix.os == 'linux'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -e
+          base=app/src-tauri/target/release/bundle
+          appimage=$(find "$base/appimage" -name '*.AppImage' | head -1)
+          deb=$(find "$base/deb" -name '*.deb' | head -1)
+          cp "$appimage" trellis-studio-linux-x86_64.AppImage
+          cp "$deb" trellis-studio-linux-amd64.deb
+          gh release upload "${{ steps.tag.outputs.value }}" \
+            trellis-studio-linux-x86_64.AppImage trellis-studio-linux-amd64.deb \
+            --clobber --repo "${{ github.repository }}"
+
+      - name: Package & upload (Windows)
+        if: matrix.os == 'windows'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -e
+          base=app/src-tauri/target/release/bundle
+          msi=$(find "$base/msi" -name '*.msi' | head -1)
+          cp "$msi" trellis-studio-windows-x64.msi
+          gh release upload "${{ steps.tag.outputs.value }}" \
+            trellis-studio-windows-x64.msi --clobber --repo "${{ github.repository }}"

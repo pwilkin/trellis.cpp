@@ -64,6 +64,21 @@ int main(int argc, char** argv) {
     std::mutex gen_mu;
     httplib::Server svr;
 
+    // Trellis Studio (and any browser client) calls this server from a different
+    // origin — a Tauri webview is tauri://localhost / http://tauri.localhost, and a
+    // browser-served UI is another port — so every response needs permissive CORS
+    // headers, and a multipart POST with non-simple headers may be preflighted with
+    // OPTIONS. Applied to every route via the post-routing hook + a catch-all OPTIONS.
+    svr.set_post_routing_handler([](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        res.set_header("Access-Control-Allow-Headers", "Content-Type");
+        res.set_header("Access-Control-Max-Age", "86400");
+    });
+    svr.Options(R"(.*)", [](const httplib::Request&, httplib::Response& res) {
+        res.status = 204;  // headers added by the post-routing handler above
+    });
+
     svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
         res.set_content("ok", "text/plain");
     });
