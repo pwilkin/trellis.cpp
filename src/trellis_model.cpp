@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 // plain fseek()'s offset is a 32-bit `long` under MSVC even in 64-bit builds,
@@ -42,22 +43,40 @@ static ggml_backend* make_backend(int gpu) {
         fprintf(stderr, "[trellis] CUDA init failed on device %d\n", gpu);
     }
 #endif
-    // Generic GPU path (e.g. Vulkan when built without CUDA): pick the GPU
-    // device with the most total memory — the cascade is VRAM-hungry.
+    // Generic GPU path (e.g. Vulkan when built without CUDA). Enumerate GPU/IGPU
+    // devices in backend order; `--gpu N` selects the N-th (matching the CUDA
+    // path's index semantics — fixes #16, where --gpu was ignored on Vulkan). The
+    // default `--gpu 0` keeps the "largest VRAM" heuristic: enumeration order can
+    // put a small iGPU first, and the cascade is VRAM-hungry, so device 0 alone is
+    // a poor default. An explicit index >0 is honored verbatim.
     {
-        ggml_backend_dev_t best = nullptr; size_t best_mem = 0;
+        std::vector<ggml_backend_dev_t> gpus;
         for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
             ggml_backend_dev_t d = ggml_backend_dev_get(i);
             enum ggml_backend_dev_type t = ggml_backend_dev_type(d);
             // IGPU: integrated GPUs (e.g. Vulkan on a UMA APU) report a distinct type.
-            if (t != GGML_BACKEND_DEVICE_TYPE_GPU && t != GGML_BACKEND_DEVICE_TYPE_IGPU) continue;
-            ggml_backend_dev_props pr; ggml_backend_dev_get_props(d, &pr);
-            if (pr.memory_total > best_mem) { best_mem = pr.memory_total; best = d; }
+            if (t == GGML_BACKEND_DEVICE_TYPE_GPU || t == GGML_BACKEND_DEVICE_TYPE_IGPU)
+                gpus.push_back(d);
         }
-        if (best) {
-            ggml_backend* b = ggml_backend_dev_init(best, nullptr);
+        ggml_backend_dev_t chosen = nullptr;
+        size_t chosen_mem = 0;
+        if (gpu > 0 && (size_t) gpu < gpus.size()) {
+            chosen = gpus[(size_t) gpu];
+            ggml_backend_dev_props pr; ggml_backend_dev_get_props(chosen, &pr);
+            chosen_mem = pr.memory_total;
+        } else if (!gpus.empty()) {
+            if (gpu > 0)
+                fprintf(stderr, "[trellis] --gpu %d out of range (%zu GPU device(s) found); using the largest\n",
+                        gpu, gpus.size());
+            for (ggml_backend_dev_t d : gpus) {
+                ggml_backend_dev_props pr; ggml_backend_dev_get_props(d, &pr);
+                if (pr.memory_total > chosen_mem) { chosen_mem = pr.memory_total; chosen = d; }
+            }
+        }
+        if (chosen) {
+            ggml_backend* b = ggml_backend_dev_init(chosen, nullptr);
             if (b) {
-                fprintf(stderr, "[trellis] using %s (%zu MB)\n", ggml_backend_name(b), best_mem / (1024 * 1024));
+                fprintf(stderr, "[trellis] using %s (%zu MB)\n", ggml_backend_name(b), chosen_mem / (1024 * 1024));
                 return b;
             }
         }

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(trellis_cpp VERSION 0.5.0 LANGUAGES CXX C)
+project(trellis_cpp VERSION 0.5.1 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -218,21 +218,35 @@ if(TARGET ggml-hip)
   # Enabling HIP makes every target that links trellis_core (which now carries a HIP object)
   # require HIP_ARCHITECTURES. Set the default globally so all subsequently-defined targets
   # (the executables below) and trellis_core itself inherit the configured GPU target(s).
+  # The GPU decimation kernel must be built for the same arch(es) as the rest of
+  # the backend. Prefer the user-provided GPU_TARGETS / AMDGPU_TARGETS (exactly
+  # what ggml itself compiles for) over an auto-detected CMAKE_HIP_ARCHITECTURES:
+  # on some toolchains CMAKE_HIP_ARCHITECTURES is pre-set to a value that omits the
+  # user's GPU, so the old `if(NOT CMAKE_HIP_ARCHITECTURES)` guard skipped the
+  # GPU_TARGETS the user passed and built the kernel for the wrong arch — hence the
+  # runtime "device kernel image is invalid" launch error (issue #14), after which
+  # decimation silently fell back to the slow CPU path.
+  if(DEFINED GPU_TARGETS AND NOT "${GPU_TARGETS}" STREQUAL "")
+    set(TRELLIS_HIP_ARCH "${GPU_TARGETS}")
+  elseif(DEFINED AMDGPU_TARGETS AND NOT "${AMDGPU_TARGETS}" STREQUAL "")
+    set(TRELLIS_HIP_ARCH "${AMDGPU_TARGETS}")
+  elseif(CMAKE_HIP_ARCHITECTURES)
+    set(TRELLIS_HIP_ARCH "${CMAKE_HIP_ARCHITECTURES}")
+  else()
+    set(TRELLIS_HIP_ARCH "gfx1151")
+  endif()
   if(NOT CMAKE_HIP_ARCHITECTURES)
-    if(DEFINED GPU_TARGETS AND NOT "${GPU_TARGETS}" STREQUAL "")
-      set(CMAKE_HIP_ARCHITECTURES "${GPU_TARGETS}")
-    elseif(DEFINED AMDGPU_TARGETS AND NOT "${AMDGPU_TARGETS}" STREQUAL "")
-      set(CMAKE_HIP_ARCHITECTURES "${AMDGPU_TARGETS}")
-    else()
-      set(CMAKE_HIP_ARCHITECTURES "gfx1151")
-    endif()
+    set(CMAKE_HIP_ARCHITECTURES "${TRELLIS_HIP_ARCH}")
   endif()
   set_source_files_properties(src/decimate_qem.cu PROPERTIES LANGUAGE HIP)
   target_sources(trellis_core PRIVATE src/decimate_qem.cu)
   target_compile_definitions(trellis_core PUBLIC TRELLIS_HAVE_GPU_DECIMATE)
   target_include_directories(trellis_core PRIVATE ${ROCM_PATH}/include)
-  set_target_properties(trellis_core PROPERTIES HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}")
-  message(STATUS "trellis.cpp: HIP/ROCm backend enabled (GPU decimation via HIP, arch ${CMAKE_HIP_ARCHITECTURES})")
+  # Force the resolved arch(es) onto the decimation object (and everything linking
+  # trellis_core), overriding any auto-detected default.
+  set_target_properties(trellis_core PROPERTIES HIP_ARCHITECTURES "${TRELLIS_HIP_ARCH}")
+  set_source_files_properties(src/decimate_qem.cu PROPERTIES HIP_ARCHITECTURES "${TRELLIS_HIP_ARCH}")
+  message(STATUS "trellis.cpp: HIP/ROCm backend enabled (GPU decimation via HIP, arch ${TRELLIS_HIP_ARCH})")
 endif()
 
 target_compile_definitions(trellis_core PRIVATE TRELLIS_BUILD_BACKEND="${TRELLIS_BUILD_BACKEND}")

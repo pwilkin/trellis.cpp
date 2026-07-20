@@ -1,6 +1,6 @@
 [package]
 name = "trellis-studio"
-version = "0.5.0"
+version = "0.5.1"
 description = "Trellis Studio — local image→3D generation UI for trellis.cpp"
 authors = ["trellis.cpp"]
 edition = "2021"

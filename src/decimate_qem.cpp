@@ -211,6 +211,10 @@ void decimate_qem(const std::vector<float>& in_verts, int V0, const std::vector<
     // Run the whole simplification on the GPU when a CUDA/HIP backend is built in; on any
     // failure (no device, alloc/kernel error) fall through to the validated CPU path.
     if (decimate_qem_gpu(in_verts, V0, in_faces, F0, target_faces, ov, of)) return;
+    // Any message above (e.g. "device kernel image is invalid" when the kernel was
+    // built for a different GPU arch — issue #14) is non-fatal: the mesh is still
+    // decimated correctly on the CPU below, just slower.
+    fprintf(stderr, "[decimate] GPU decimation unavailable; falling back to the CPU path (output is unaffected)\n");
 #endif
 
 #ifdef TRELLIS_HAVE_VK_DECIMATE
