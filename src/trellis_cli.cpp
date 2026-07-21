@@ -366,7 +366,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
                                                      mesh.faces.data(), mesh.F());
         trellis::Mesh rm = trellis::remesh_narrow_band_dc(mesh.verts.data(), mesh.V(),
                                                           mesh.faces.data(), mesh.F(),
-                                                          bvh, so.res);
+                                                          bvh, so.res, cfg.band);
         // Clean the narrow-band DC output (drop degenerate faces, unify winding), then drop
         // decode floaters (the reference is a single watertight component; ours shattered into
         // 50+ pieces). The faithful QEM simplifier below handles surface smoothing via its

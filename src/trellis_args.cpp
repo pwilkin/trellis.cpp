@@ -36,6 +36,9 @@ void print_usage(const char* argv0, bool server) {
         "      --no-texture        geometry only\n"
         "      --xatlas            xatlas UV unwrap (default)\n"
         "      --box-uv            voxel-native box projection (faster)\n"
+        "      --band N            narrow-band DC remesh band width (default 1;\n"
+        "                          2 = thicker offset shell, suppresses the doubled\n"
+        "                          inner skin thin-walled subjects develop at 1)\n"
         "      --decim GRID        legacy cluster-grid decimation (default: quadric\n"
         "                          simplify to 300K faces @1024 / 150K @512; 0 = none)\n"
         "      --atlas PX          UV atlas size (default 2048 @1024 / 1024 @512)\n"
@@ -79,6 +82,7 @@ bool parse_args(int argc, char** argv, TrellisParams& p) {
         else if (a == "--no-texture")           { p.texture = false; }
         else if (a == "--xatlas")               { p.xatlas = true; }
         else if (a == "--box-uv")               { p.xatlas = false; }
+        else if (a == "--band")                 { const char* v = need(a.c_str()); if (!v) return false; p.band = atoi(v); }
         else if (a == "--decim")                { const char* v = need(a.c_str()); if (!v) return false; p.decim = atoi(v); }
         else if (a == "--atlas" || a == "--tex"){ const char* v = need(a.c_str()); if (!v) return false; p.tex = atoi(v); }
         else if (a == "--tex-res")              { const char* v = need(a.c_str()); if (!v) return false; p.tex_res = atoi(v); }
