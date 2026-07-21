@@ -288,8 +288,17 @@ jobs:
           deb=$(find "$base/deb" -name '*.deb' | head -1)
           cp "$appimage" trellis-studio-linux-x86_64.AppImage
           cp "$deb" trellis-studio-linux-amd64.deb
+          # Portable, no-install tarball: the raw binary + a portable.dat marker
+          # (which makes the app keep config/data next to itself). Relies on the
+          # system webkit2gtk-4.1, like the .deb.
+          rm -rf portable && mkdir -p portable
+          cp app/src-tauri/target/release/trellis-studio portable/
+          cp install/portable-readme.txt portable/README.txt
+          : > portable/portable.dat
+          tar -C portable -czf trellis-studio-linux-x86_64-portable.tar.gz .
           gh release upload "${{ steps.tag.outputs.value }}" \
             trellis-studio-linux-x86_64.AppImage trellis-studio-linux-amd64.deb \
+            trellis-studio-linux-x86_64-portable.tar.gz \
             --clobber --repo "${{ github.repository }}"
 
       - name: Package & upload (Windows)
@@ -304,5 +313,15 @@ jobs:
           exe=$(find "$base/nsis" -name '*-setup.exe' | head -1)
           test -n "$exe" || { echo "NSIS installer not found under $base/nsis"; ls -R "$base" || true; exit 1; }
           cp "$exe" trellis-studio-windows-x64-setup.exe
+          # Portable, no-install zip: the raw exe + a portable.dat marker (which
+          # makes the app keep config/data next to itself). WebView2 runtime is a
+          # system component, present on Win10/11.
+          rm -rf portable && mkdir -p portable
+          cp app/src-tauri/target/release/trellis-studio.exe portable/
+          cp app/src-tauri/target/release/*.dll portable/ 2>/dev/null || true
+          cp install/portable-readme.txt portable/README.txt
+          : > portable/portable.dat
+          (cd portable && 7z a -y ../trellis-studio-windows-x64-portable.zip ./* >/dev/null)
           gh release upload "${{ steps.tag.outputs.value }}" \
-            trellis-studio-windows-x64-setup.exe --clobber --repo "${{ github.repository }}"
+            trellis-studio-windows-x64-setup.exe trellis-studio-windows-x64-portable.zip \
+            --clobber --repo "${{ github.repository }}"

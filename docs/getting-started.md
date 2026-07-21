@@ -90,6 +90,22 @@ The UI is a plain web bundle, so you can skip the desktop app entirely:
 then open the built UI (or `npm run dev` in `app/`) and point it at
 `127.0.0.1:8080` in **Settings**.
 
+## Portable (no-install)
+
+Prefer not to install anything? Grab the portable archive from the releases page
+instead of running an installer:
+
+- Windows: `trellis-studio-windows-x64-portable.zip`
+- Linux: `trellis-studio-linux-x86_64-portable.tar.gz`
+
+Unzip it anywhere and run the app in place — it keeps **everything inside that
+folder** (config and generated GLBs go to `./data/`, and it auto-detects a
+`./runtime/` server and `./models/` weights next to it), so nothing is written to
+your system. Drop the `trellis-<backend>-<os>-x64` runtime into a `runtime/`
+folder and the GGUFs into `models/` (or point it at existing ones in Settings),
+and you're set. Delete the folder to uninstall. (Linux still needs system
+`webkit2gtk-4.1`.)
+
 ## Troubleshooting
 
 - **"Server is offline"** right after generating — the pipeline is still loading
