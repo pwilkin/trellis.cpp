@@ -38,7 +38,10 @@ pub fn config_path() -> Option<PathBuf> {
 pub fn load() -> Option<Config> {
     let p = config_path()?;
     let s = std::fs::read_to_string(p).ok()?;
-    serde_json::from_str(&s).ok()
+    // Tolerate a UTF-8 BOM: some Windows editors / PowerShell's `Set-Content
+    // -Encoding UTF8` prepend one, and serde_json won't parse past it.
+    let s = s.strip_prefix('\u{feff}').unwrap_or(&s);
+    serde_json::from_str(s).ok()
 }
 
 pub fn save(cfg: &Config) -> Result<(), String> {

@@ -142,7 +142,14 @@ $cfg = [ordered]@{
   host      = "127.0.0.1"
   port      = $Port
 }
-$cfg | ConvertTo-Json | Set-Content -Path (Join-Path $ConfigDir "config.json") -Encoding UTF8
+# Write UTF-8 *without* a BOM: Windows PowerShell 5.1's `Set-Content -Encoding UTF8`
+# prepends a BOM, which serde_json (the app's config reader) refuses to parse, so the
+# app would silently fall back to an empty/"unknown" config. WriteAllText with an
+# explicit no-BOM encoding works on both Windows PowerShell 5.1 and PowerShell 7.
+[System.IO.File]::WriteAllText(
+  (Join-Path $ConfigDir "config.json"),
+  ($cfg | ConvertTo-Json),
+  (New-Object System.Text.UTF8Encoding($false)))
 Info "config: $(Join-Path $ConfigDir 'config.json')"
 
 Write-Host ""
