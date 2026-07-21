@@ -36,6 +36,10 @@ struct TrellisParams {
                                 // as background and the model then generates holes there.)
     bool texture  = true;       // texture flow + UV bake (else geometry-only)
     bool xatlas   = true;       // xatlas UV unwrap (else voxel-native box projection)
+    int  band     = 1;          // narrow-band DC remesh band width (remesh_dc.h).
+                                //   1 = reference default; 2 = thicker offset shell,
+                                //   suppresses the doubled inner skin some subjects
+                                //   develop at band 1 (thin walls, chairs, vessels)
     int  decim    = -1;         // decimation cluster grid   (-1 => per-cascade default)
     int  tex      = -1;         // UV atlas size in px        (-1 => per-cascade default)
     int  tex_res  = -1;         // texture PBR resolution: -1 => auto (drop dense res-1024 tex to

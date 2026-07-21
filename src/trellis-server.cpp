@@ -4,7 +4,8 @@
 //   POST /generate    multipart/form-data with an "image" file part; optional text
 //                      fields "seed", "resolution" (512/1024/1536), "bg_removal"
 //                      (threshold|birefnet), "uv" (xatlas = default, unique
-//                      chart space; box = faster projection). Returns
+//                      chart space; box = faster projection), "band" (narrow-band
+//                      DC remesh band width, default 1 — see --band). Returns
 //                      model/gltf-binary.
 //
 // Launch-time defaults come from CLI flags (see trellis::parse_args);
@@ -97,6 +98,7 @@ int main(int argc, char** argv) {
         if (req.has_file("resolution")) p.set_res(atoi(req.get_file_value("resolution").content.c_str()));
         if (req.has_file("bg_removal")) p.birefnet = (req.get_file_value("bg_removal").content == "birefnet") ? 1 : 0;
         if (req.has_file("uv")) p.xatlas = (req.get_file_value("uv").content == "xatlas");
+        if (req.has_file("band")) p.band = atoi(req.get_file_value("band").content.c_str());
 
         const std::string stem = temp_stem();
         p.image  = stem + ".png";
