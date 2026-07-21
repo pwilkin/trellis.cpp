@@ -3,7 +3,7 @@ import { generate, health } from "./api";
 import { loadConfig } from "./config";
 import { renderSettings } from "./settings";
 import { all, clear as clearStore, del as removeRecord, get as getRecord, newId, put } from "./store";
-import { isTauri, listen, saveBytes } from "./tauri";
+import { isTauri, listen, saveBytes, saveToOutputDir } from "./tauri";
 import { Viewer } from "./viewer";
 import { DEFAULT_PARAMS, type GenParams, type GenRecord } from "./types";
 
@@ -157,6 +157,19 @@ async function doGenerate(): Promise<void> {
     viewerCaption.textContent = `${params.resolution} · seed ${params.seed} · ${(glb.size / 1e6).toFixed(1)} MB`;
     await refreshGallery();
     toast("Generation complete", "ok");
+
+    // Auto-save the GLB to the configured output folder (Tauri only).
+    if (isTauri()) {
+      try {
+        const bytes = new Uint8Array(await glb.arrayBuffer());
+        const base = inputName.replace(/\.[^.]+$/, "") || "model";
+        const fname = `${base}_${params.resolution}_seed${params.seed}_${rec.id}.glb`;
+        const saved = await saveToOutputDir(fname, bytes);
+        if (saved) toast(`Saved to ${saved}`, "ok");
+      } catch (e) {
+        toast(`Auto-save to output folder failed: ${(e as Error).message}`, "err");
+      }
+    }
   } catch (e) {
     if (abort?.signal.aborted) toast("Generation cancelled");
     else toast((e as Error).message || "generation failed", "err");

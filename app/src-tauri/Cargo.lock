@@ -3605,7 +3605,7 @@ dependencies = [
 
 [[package]]
 name = "trellis-studio"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "dirs 5.0.1",
  "serde",

@@ -141,6 +141,7 @@ $cfg = [ordered]@{
   gpu       = $Gpu
   host      = "127.0.0.1"
   port      = $Port
+  outputDir = (Join-Path $Dest "output")
 }
 # Write UTF-8 *without* a BOM: Windows PowerShell 5.1's `Set-Content -Encoding UTF8`
 # prepends a BOM, which serde_json (the app's config reader) refuses to parse, so the

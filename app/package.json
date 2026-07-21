@@ -1,7 +1,7 @@
 {
   "name": "trellis-studio",
   "private": true,
-  "version": "0.5.1",
+  "version": "0.5.2",
   "type": "module",
   "description": "Trellis Studio — desktop app for local image→3D generation with trellis.cpp",
   "scripts": {

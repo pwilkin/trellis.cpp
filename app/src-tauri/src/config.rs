@@ -19,6 +19,9 @@ pub struct Config {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Where generated GLBs are auto-saved. Empty => use `default_output_dir()`.
+    #[serde(rename = "outputDir", default)]
+    pub output_dir: String,
 }
 
 fn default_backend() -> String {
@@ -29,6 +32,29 @@ fn default_host() -> String {
 }
 fn default_port() -> u16 {
     8080
+}
+
+/// Default location for generated GLBs: <local-data>/trellis-studio/output
+/// (%LOCALAPPDATA%\trellis-studio\output on Windows, ~/.local/share/... on Linux).
+pub fn default_output_dir() -> String {
+    dirs::data_local_dir()
+        .map(|d| d.join("trellis-studio").join("output"))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The effective output dir (config value or default), created if missing.
+pub fn resolve_output_dir() -> Result<PathBuf, String> {
+    let dir = load()
+        .map(|c| c.output_dir)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(default_output_dir);
+    if dir.is_empty() {
+        return Err("could not determine an output directory".to_string());
+    }
+    let p = PathBuf::from(dir);
+    std::fs::create_dir_all(&p).map_err(|e| e.to_string())?;
+    Ok(p)
 }
 
 pub fn config_path() -> Option<PathBuf> {

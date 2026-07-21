@@ -48,3 +48,29 @@ export async function saveBytes(defaultName: string, bytes: Uint8Array): Promise
   URL.revokeObjectURL(url);
   return true;
 }
+
+/** Native folder picker (Tauri only); returns the chosen path or null. */
+export async function pickDirectory(current?: string): Promise<string | null> {
+  if (!isTauri()) return null;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const res = await open({ directory: true, defaultPath: current || undefined });
+  return typeof res === "string" ? res : null;
+}
+
+/** Open the configured output directory in the OS file browser (Tauri only). */
+export async function openOutputDir(): Promise<void> {
+  if (isTauri()) await invoke("open_output_dir");
+}
+
+/**
+ * Auto-save GLB bytes into the configured output directory (Tauri only).
+ * The Rust side resolves + creates the dir and returns the full path; the fs
+ * plugin then writes the bytes there. Returns the path, or null in the browser.
+ */
+export async function saveToOutputDir(name: string, bytes: Uint8Array): Promise<string | null> {
+  if (!isTauri()) return null;
+  const { writeFile } = await import("@tauri-apps/plugin-fs");
+  const path = await invoke<string>("output_path", { name });
+  await writeFile(path, bytes);
+  return path;
+}

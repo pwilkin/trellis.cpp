@@ -161,7 +161,8 @@ cat > "$CONFIG_DIR/config.json" <<JSON
   "backend": "$BACKEND",
   "gpu": $GPU,
   "host": "127.0.0.1",
-  "port": $PORT
+  "port": $PORT,
+  "outputDir": "$DEST/output"
 }
 JSON
 info "config: $CONFIG_DIR/config.json"

@@ -3,11 +3,21 @@
 // (which restarts the server); in the browser we only expose host/port.
 
 import { loadConfig, saveConfig } from "./config";
-import { invoke, isTauri } from "./tauri";
+import { invoke, isTauri, openOutputDir, pickDirectory } from "./tauri";
 
 function field(label: string, id: string, value: string, type = "text"): string {
   return `<label class="ctl"><span>${label}</span>
     <input id="${id}" type="${type}" value="${value.replace(/"/g, "&quot;")}" /></label>`;
+}
+
+/** Text field with a "Browse…" folder picker and an "Open" button. */
+function dirField(label: string, id: string, value: string): string {
+  return `<label class="ctl"><span>${label}</span>
+    <div class="dir-row">
+      <input id="${id}" type="text" value="${value.replace(/"/g, "&quot;")}" />
+      <button id="${id}-browse" class="tool-btn" type="button">Browse…</button>
+      <button id="${id}-open" class="tool-btn" type="button">Open</button>
+    </div></label>`;
 }
 
 function ro(label: string, value: string): string {
@@ -21,10 +31,22 @@ export async function renderSettings(
   const cfg = await loadConfig(true);
 
   if (isTauri()) {
+    // get_config already fills the default output dir; fall back to it when unset
+    // (e.g. no config.json yet).
+    let outputDir = cfg.outputDir;
+    if (!outputDir) {
+      try {
+        outputDir = await invoke<string>("default_output_dir");
+      } catch {
+        /* leave blank */
+      }
+    }
+
     body.innerHTML = `
       ${ro("Backend", cfg.backend)}
       ${ro("Server binary", cfg.serverBin)}
       ${field("Models directory", "set-models", cfg.modelsDir)}
+      ${dirField("Output folder (generated GLBs are saved here)", "set-output", outputDir)}
       ${field("GPU index (&lt;0 = CPU)", "set-gpu", String(cfg.gpu), "number")}
       ${field("Port", "set-port", String(cfg.port), "number")}
       <div class="modal-actions">
@@ -32,11 +54,31 @@ export async function renderSettings(
         <button id="set-save" class="primary">Save &amp; restart</button>
       </div>`;
 
+    const outputInput = body.querySelector("#set-output") as HTMLInputElement;
+    (body.querySelector("#set-output-browse") as HTMLButtonElement).onclick = async () => {
+      const picked = await pickDirectory(outputInput.value.trim());
+      if (picked) outputInput.value = picked;
+    };
+    (body.querySelector("#set-output-open") as HTMLButtonElement).onclick = async () => {
+      // persist the (possibly-edited) path first so the shell opens what's shown
+      await saveConfig({ outputDir: outputInput.value.trim() });
+      try {
+        await openOutputDir();
+      } catch (e) {
+        alert(`Could not open the output folder: ${(e as Error).message ?? e}`);
+      }
+    };
+
     const save = async () => {
       const modelsDir = (body.querySelector("#set-models") as HTMLInputElement).value.trim();
       const gpu = parseInt((body.querySelector("#set-gpu") as HTMLInputElement).value, 10);
       const port = parseInt((body.querySelector("#set-port") as HTMLInputElement).value, 10);
-      await saveConfig({ modelsDir, gpu: isNaN(gpu) ? 0 : gpu, port: isNaN(port) ? 8080 : port });
+      await saveConfig({
+        modelsDir,
+        gpu: isNaN(gpu) ? 0 : gpu,
+        port: isNaN(port) ? 8080 : port,
+        outputDir: outputInput.value.trim(),
+      });
       try {
         await invoke("restart_server");
       } catch {

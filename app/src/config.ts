@@ -14,6 +14,7 @@ const DEFAULTS: AppConfig = {
   gpu: 0,
   host: "127.0.0.1",
   port: 8080,
+  outputDir: "",
   configured: false,
 };
 

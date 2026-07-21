@@ -11,12 +11,46 @@ use tauri::Manager;
 
 #[tauri::command]
 fn get_config() -> Option<config::Config> {
-    config::load()
+    config::load().map(|mut c| {
+        if c.output_dir.trim().is_empty() {
+            c.output_dir = config::default_output_dir();
+        }
+        c
+    })
 }
 
 #[tauri::command]
 fn save_config(config: config::Config) -> Result<(), String> {
     config::save(&config)
+}
+
+#[tauri::command]
+fn default_output_dir() -> String {
+    config::default_output_dir()
+}
+
+/// Resolve the output dir (creating it), return the full path for `name` so the UI
+/// can write the GLB there via the fs plugin.
+#[tauri::command]
+fn output_path(name: String) -> Result<String, String> {
+    let dir = config::resolve_output_dir()?;
+    Ok(dir.join(name).to_string_lossy().into_owned())
+}
+
+/// Open the output directory in the OS file browser (Explorer / Finder / xdg-open).
+/// AppData\Local is awkward to reach in Explorer, so this button matters.
+#[tauri::command]
+fn open_output_dir() -> Result<(), String> {
+    let dir = config::resolve_output_dir()?;
+    #[cfg(target_os = "windows")]
+    let mut cmd = std::process::Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(&dir);
+    // explorer.exe returns a non-zero exit code even on success; spawn() ignores it.
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -38,6 +72,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_config,
+            default_output_dir,
+            output_path,
+            open_output_dir,
             restart_server,
             server_running
         ])

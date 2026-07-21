@@ -27,6 +27,8 @@ export interface AppConfig {
   gpu: number;
   host: string;
   port: number;
+  /** where generated GLBs are auto-saved (Tauri only). */
+  outputDir: string;
   /** true once the shell has a usable config.json; false => "setup needed". */
   configured: boolean;
 }

@@ -183,6 +183,9 @@ body {
 }
 .modal-body { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
 .modal-body .ctl input { width: 100%; }
+.dir-row { display: flex; gap: 6px; align-items: stretch; }
+.dir-row input { flex: 1 1 auto; min-width: 0; }
+.dir-row .tool-btn { flex: 0 0 auto; white-space: nowrap; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 .kv { font-size: 12px; color: var(--muted); }
 .kv b { color: var(--text); font-weight: 500; }
