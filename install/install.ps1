@@ -14,7 +14,10 @@
 #>
 [CmdletBinding()]
 param(
-  [ValidateSet("cuda", "rocm", "vulkan")] [string]$Backend = "",
+  # Validated manually below: an empty default (auto-detect) is not a member of the
+  # allowed set, and a [ValidateSet] default mismatch is a fatal bind error under
+  # `irm ... | iex` (ValidateSetFailure).
+  [string]$Backend = "",
   [int]$Gpu = 0,
   [int]$Port = 8080,
   [string]$Dest = "$env:LOCALAPPDATA\trellis-studio",
@@ -61,6 +64,7 @@ if (-not $Backend) {
   $Backend = Detect-Backend
   Log "auto-detected backend: $Backend"
 } else {
+  if ($Backend -notin @("cuda", "rocm", "vulkan")) { Die "invalid backend: $Backend (use cuda|rocm|vulkan)" }
   Log "backend (forced): $Backend"
 }
 
