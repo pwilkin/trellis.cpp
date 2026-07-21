@@ -72,7 +72,14 @@ export class Viewer {
         const detail = (e as CustomEvent).detail;
         reject(new Error(String(detail?.sourceError ?? "failed to load model")));
       };
+      // Guard against model-viewer never firing load/error (e.g. a stalled WebGL
+      // init) so the caller's flow can't hang forever.
+      const timer = window.setTimeout(() => {
+        cleanup();
+        reject(new Error("3D preview timed out"));
+      }, 30000);
       const cleanup = () => {
+        window.clearTimeout(timer);
         this.el.removeEventListener("load", onLoad);
         this.el.removeEventListener("error", onError);
       };

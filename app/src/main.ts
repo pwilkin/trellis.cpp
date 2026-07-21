@@ -139,8 +139,12 @@ async function doGenerate(): Promise<void> {
   abort = new AbortController();
   try {
     const { glb } = await generate(inputImage, params, abort.signal);
-    await viewer.load(glb);
-    const thumb = await viewer.thumbnail();
+    currentGlb = glb;
+
+    // Persist the result FIRST — before touching the 3D preview — so a WebGL /
+    // model-viewer failure (e.g. "reading 'scene'") can never lose a successful
+    // generation. The gallery and the output folder are written up front; the
+    // interactive preview below is strictly best-effort.
     const rec: GenRecord = {
       id: newId(),
       ts: Date.now(),
@@ -148,27 +152,39 @@ async function doGenerate(): Promise<void> {
       params,
       input: inputImage,
       glb,
-      thumb,
+      thumb: null,
     };
     await put(rec);
     activeId = rec.id;
-    currentGlb = glb;
     setViewerTools(true);
     viewerCaption.textContent = `${params.resolution} · seed ${params.seed} · ${(glb.size / 1e6).toFixed(1)} MB`;
     await refreshGallery();
-    toast("Generation complete", "ok");
 
-    // Auto-save the GLB to the configured output folder (Tauri only).
+    // Auto-save the GLB to the configured output folder (Tauri only) — also up front.
+    let savedPath: string | null = null;
     if (isTauri()) {
       try {
         const bytes = new Uint8Array(await glb.arrayBuffer());
         const base = inputName.replace(/\.[^.]+$/, "") || "model";
         const fname = `${base}_${params.resolution}_seed${params.seed}_${rec.id}.glb`;
-        const saved = await saveToOutputDir(fname, bytes);
-        if (saved) toast(`Saved to ${saved}`, "ok");
+        savedPath = await saveToOutputDir(fname, bytes);
       } catch (e) {
         toast(`Auto-save to output folder failed: ${(e as Error).message}`, "err");
       }
+    }
+    toast(savedPath ? `Saved to ${savedPath}` : "Generation complete", "ok");
+
+    // Best-effort 3D preview + gallery thumbnail — never blocks the save above.
+    try {
+      await viewer.load(glb);
+      const thumb = await viewer.thumbnail();
+      if (thumb) {
+        rec.thumb = thumb;
+        await put(rec);
+        await refreshGallery();
+      }
+    } catch (e) {
+      toast(`3D preview couldn't render (your result is still saved): ${(e as Error).message}`, "err");
     }
   } catch (e) {
     if (abort?.signal.aborted) toast("Generation cancelled");
