@@ -114,6 +114,7 @@ The most useful ones:
 | `--res 512\|1024\|1536` | geometry resolution (512 = light path, no cascade) |
 | `--bg-removal threshold\|birefnet` | default **auto**: pre-matted images keep their alpha, otherwise the BiRefNet matte (~13s on GPU). The plain white-bg keyer cuts specular highlights out of the alpha — the flow then generates holes there — so it is opt-in only |
 | `--no-texture` | geometry only |
+| `--faces N` | QEM face target before UV bake (default 300K @1024 / 150K @512; min 1000) |
 | `--decim GRID` | legacy cluster-grid decimation (default: quadric simplify to 300K faces @1024 / 150K @512; `0` = keep the full-res mesh) |
 | `--atlas PX` | UV atlas size (default 2048 @1024 / 1024 @512) |
 | `--box-uv` | voxel-native 6-way box projection instead of the default xatlas unwrap (O(faces), faster, looser packing) |
@@ -143,7 +144,9 @@ behavior-driving environment variables remain — use the flags above.
 GET  /health     -> "ok"
 POST /generate      multipart/form-data with an "image" file part; optional text
                     fields "seed", "resolution" (512/1024/1536), "bg_removal"
-                    (threshold|birefnet). Returns model/gltf-binary.
+                    (threshold|birefnet), "uv" (xatlas|box), "band", "webp",
+                    "face_budget" (QEM face target before UV bake; omit = default).
+                    Returns model/gltf-binary.
 ```
 
 Launch-time flags (including `--res`) set the per-request defaults; each request can

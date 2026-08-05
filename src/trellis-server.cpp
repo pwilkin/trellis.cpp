@@ -5,7 +5,8 @@
 //                      fields "seed", "resolution" (512/1024/1536), "bg_removal"
 //                      (threshold|birefnet), "uv" (xatlas = default, unique
 //                      chart space; box = faster projection), "band" (narrow-band
-//                      DC remesh band width, default 1 — see --band). Returns
+//                      DC remesh band width — see --band), "face_budget" (QEM face
+//                      target before UV bake; omit = cascade default). Returns
 //                      model/gltf-binary.
 //
 // Launch-time defaults come from CLI flags (see trellis::parse_args);
@@ -99,6 +100,7 @@ int main(int argc, char** argv) {
         if (req.has_file("bg_removal")) p.birefnet = (req.get_file_value("bg_removal").content == "birefnet") ? 1 : 0;
         if (req.has_file("uv")) p.xatlas = (req.get_file_value("uv").content == "xatlas");
         if (req.has_file("band")) p.band = atoi(req.get_file_value("band").content.c_str());
+        if (req.has_file("face_budget")) p.faces = atoi(req.get_file_value("face_budget").content.c_str());
         if (req.has_file("webp")) {
             const std::string& w = req.get_file_value("webp").content;
             p.webp = (w == "off" || w == "0" || w == "false") ? 0
@@ -118,9 +120,10 @@ int main(int argc, char** argv) {
                 res.set_content("{\"error\":\"failed to stage input image\"}", "application/json");
                 return;
             }
-            fprintf(stderr, "[trellis-server] generate: %zu-byte image, seed %u, res %s, bg %s, uv %s\n",
+            fprintf(stderr, "[trellis-server] generate: %zu-byte image, seed %u, res %s, bg %s, uv %s, faces %s\n",
                     image.content.size(), p.seed, p.cascade ? std::to_string(p.hr_res).c_str() : "512",
-                    p.birefnet < 0 ? "auto" : (p.birefnet ? "birefnet" : "threshold"), p.xatlas ? "xatlas" : "box");
+                    p.birefnet < 0 ? "auto" : (p.birefnet ? "birefnet" : "threshold"), p.xatlas ? "xatlas" : "box",
+                    p.faces > 0 ? std::to_string(p.faces).c_str() : "default");
             try {
                 int rc = trellis_run(p);
                 if (rc == 0) glb = read_file_bytes(p.output);

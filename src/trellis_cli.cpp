@@ -16,6 +16,7 @@
 #include "trellis_run.h"
 
 #include <cstdio>
+#include <cstring>
 #include <random>
 #include <vector>
 #include <string>
@@ -23,9 +24,42 @@
 #include <set>
 #include <array>
 #include <cmath>
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
 
 using std::vector;
 static double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
+// Debug dumps (TRELLIS_DUMP_*) take an operator-supplied name, but the open
+// path is always rebuilt under a fixed dump directory + basename so env values
+// cannot traverse outside that directory (CWE-22).
+static FILE* open_debug_dump(const char* env_val, char* out_path, size_t out_sz) {
+    if (!env_val || !*env_val || !out_path || out_sz < 32) return nullptr;
+    const char* slash = std::strrchr(env_val, '/');
+#ifdef _WIN32
+    const char* bslash = std::strrchr(env_val, '\\');
+    if (bslash && (!slash || bslash > slash)) slash = bslash;
+#endif
+    const char* base = slash ? slash + 1 : env_val;
+    if (!*base || std::strcmp(base, ".") == 0 || std::strcmp(base, "..") == 0) return nullptr;
+    for (const char* p = base; *p; ++p) {
+        const unsigned char c = static_cast<unsigned char>(*p);
+        if (c < 0x20 || c == '/' || c == '\\') return nullptr;
+    }
+#ifdef _WIN32
+    static const char kDir[] = "trellis-dumps";
+    _mkdir(kDir);
+#else
+    static const char kDir[] = "/tmp/trellis-dumps";
+    ::mkdir(kDir, 0700);
+#endif
+    const int n = std::snprintf(out_path, out_sz, "%s/%s", kDir, base);
+    if (n <= 0 || static_cast<size_t>(n) >= out_sz) return nullptr;
+    return std::fopen(out_path, "wb");
+}
 // [dbg] overall stats of a flat tensor — used to compare LR vs HR shape-SLAT in decode space.
 static void slat_stats(const char* tag, const vector<float>& v) {
     if (v.empty()) { printf("      [stats] %s EMPTY\n", tag); return; }
@@ -260,9 +294,14 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         if (nh) printf("      filled %d small holes -> V=%d F=%d\n", nh, mesh.V(), mesh.F());
     }
     if (const char* dp = std::getenv("TRELLIS_DUMP_DECMESH")) {   // pre-remesh decoded mesh (int V,F,verts,faces) for remesh A/B
-        FILE* f = fopen(dp, "wb"); if (f) { int v=mesh.V(), fc=mesh.F();
+        char dump_path[512];
+        if (FILE* f = open_debug_dump(dp, dump_path, sizeof(dump_path))) {
+            int v=mesh.V(), fc=mesh.F();
             fwrite(&v,4,1,f); fwrite(&fc,4,1,f); fwrite(mesh.verts.data(),4,mesh.verts.size(),f); fwrite(mesh.faces.data(),4,mesh.faces.size(),f); fclose(f);
-            printf("      [dump] pre-remesh mesh -> %s\n", dp); fflush(stdout); }
+            printf("      [dump] pre-remesh mesh -> %s\n", dump_path); fflush(stdout);
+        } else {
+            fprintf(stderr, "      [dump] refusing TRELLIS_DUMP_DECMESH (use a plain filename; written under the trellis-dumps directory)\n");
+        }
     }
 
     vector<float> colors, pbr6;   // colors = base RGB (PLY); pbr6 = per-vertex [V*6] for UV bake
@@ -355,8 +394,9 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         const bool boxuv = !cfg.xatlas;
         const int T = cfg.tex >= 0 ? cfg.tex : (cascade ? 2048 : 1024);
         if (const char* dp = std::getenv("TRELLIS_DUMP_POST")) {
-            FILE* dfp = fopen(dp, "wb");
-            if (dfp) {   // geometry mesh + the PBR volume the bake samples (may be res-512 in mixed mode)
+            char dump_path[512];
+            if (FILE* dfp = open_debug_dump(dp, dump_path, sizeof(dump_path))) {
+                // geometry mesh + the PBR volume the bake samples (may be res-512 in mixed mode)
                 int dV = mesh.V(), dFc = mesh.F(), Mv = (int)pbr_coords->size(), res = pbr_res;
                 fwrite(&dV,4,1,dfp); fwrite(&dFc,4,1,dfp); fwrite(&Mv,4,1,dfp); fwrite(&res,4,1,dfp);
                 fwrite(mesh.verts.data(),4,(size_t)dV*3,dfp);
@@ -364,7 +404,9 @@ int trellis_run(const trellis::TrellisParams& cfg) {
                 for (auto& c : *pbr_coords) { int xyz[3] = {c[0],c[1],c[2]}; fwrite(xyz,4,3,dfp); }
                 fwrite(pbr6.data(),4,(size_t)Mv*6,dfp);
                 fclose(dfp);
-                printf("      [dump] post-stage inputs -> %s\n", dp);
+                printf("      [dump] post-stage inputs -> %s\n", dump_path);
+            } else {
+                fprintf(stderr, "      [dump] refusing TRELLIS_DUMP_POST (use a plain filename; written under the trellis-dumps directory)\n");
             }
         }
         trellis::weld_vertices(mesh.verts, mesh.faces, colors.empty() ? nullptr : &colors,
@@ -405,8 +447,12 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         } else if (cfg.decim == 0) {
             dv = sverts; df = sfaces;
         } else {
+            // Custom --faces / face_budget wins; else cascade defaults. Clamp the
+            // floor so a typo cannot ask QEM for a degenerate handful of triangles.
+            int face_target = cfg.faces > 0 ? cfg.faces : (cascade ? 300000 : 150000);
+            if (face_target < 1000) face_target = 1000;
             trellis::decimate_qem(sverts, (int)sverts.size()/3, sfaces, (int)sfaces.size()/3,
-                                  cascade ? 300000 : 150000, dv, df);
+                                  face_target, dv, df);
             trellis::weld_vertices(dv, df, nullptr, 1.0f / ((float)so.res * 8.0f));
             trellis::fill_small_holes(df);
             // Second component pass on the decimated mesh: a hallucinated ground plane
