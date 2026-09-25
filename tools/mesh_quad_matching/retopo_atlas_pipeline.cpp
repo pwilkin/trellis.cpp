@@ -1,4 +1,5 @@
 #include "uv_overlap_cover.h"
+#include "retopo_process.h"
 
 #include <algorithm>
 #include <array>
@@ -16,8 +17,10 @@
 #include <string>
 #include <vector>
 #include <fcntl.h>
+#ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 namespace fs=std::filesystem;
 
@@ -29,6 +32,10 @@ std::string read_text(const fs::path& path) {
 
 int run(const fs::path& program, const std::vector<std::string>& args,
         const fs::path& log, const fs::path& scratch) {
+#ifdef _WIN32
+    return trellis::retopo_process::run(program,args,
+        {{L"TEMP",scratch.wstring()},{L"TMP",scratch.wstring()}},log);
+#else
     const pid_t pid=fork();
     if (pid<0) throw std::runtime_error("Cannot start " + program.string());
     if (pid==0) {
@@ -48,6 +55,17 @@ int run(const fs::path& program, const std::vector<std::string>& args,
     if (waitpid(pid,&status,0)<0 || !WIFEXITED(status))
         throw std::runtime_error("Stage interrupted: " + program.string());
     return WEXITSTATUS(status);
+#endif
+}
+
+bool set_env(const char* key,const char* value) {
+#ifdef _WIN32
+    return _putenv_s(key,value)==0 &&
+           SetEnvironmentVariableW(trellis::retopo_process::wide(key).c_str(),
+                                   trellis::retopo_process::wide(value).c_str())!=0;
+#else
+    return setenv(key,value,1)==0;
+#endif
 }
 
 uint32_t face_count(const fs::path& uv) {
@@ -177,17 +195,21 @@ int main(int argc,char** argv) {
         }
         const fs::path scratch=output.parent_path();
         fs::create_directories(scratch);
-        if (setenv("TRELLIS_PROBE_ATLAS_RES",resolution.c_str(),1)!=0 ||
-            setenv("TRELLIS_PROBE_ATLAS_PADDING","2",1)!=0 ||
+        if (!set_env("TRELLIS_PROBE_ATLAS_RES",resolution.c_str()) ||
+            !set_env("TRELLIS_PROBE_ATLAS_PADDING","2") ||
             (!std::getenv("TRELLIS_PROBE_ATLAS_TPU") &&
-             setenv("TRELLIS_PROBE_ATLAS_TPU","0.0039",1)!=0) ||
+             !set_env("TRELLIS_PROBE_ATLAS_TPU","0.0039")) ||
             (!std::getenv("TRELLIS_PROBE_ATLAS_BACKOFF") &&
-             setenv("TRELLIS_PROBE_ATLAS_BACKOFF","0.95",1)!=0))
+             !set_env("TRELLIS_PROBE_ATLAS_BACKOFF","0.95")))
             throw std::runtime_error("Cannot configure native atlas resolution");
         const fs::path prefix=scratch/(output.stem().string()+".retopo");
         const fs::path accepted_report=prefix.string()+"-accepted.json";
         fs::remove(accepted_report);
+#ifdef _WIN32
+        const fs::path binaries=trellis::retopo_process::executable_directory();
+#else
         const fs::path binaries=fs::canonical("/proc/self/exe").parent_path();
+#endif
         const auto stage=[&](const char* name,const std::vector<std::string>& args,
                              const fs::path& log,bool allow_one=false) {
             const int code=run(binaries/name,args,log,scratch);
@@ -196,10 +218,10 @@ int main(int argc,char** argv) {
             return code;
         };
         if (from_post) {
-            if (setenv("TRELLIS_QEM_PRESERVE_TOPOLOGY","1",1)!=0 ||
-                setenv("TRELLIS_QEM_COLLISION_GUARD","1",1)!=0 ||
-                setenv("TRELLIS_REMESH_TETS","1",1)!=0 ||
-                setenv("TRELLIS_TETS_MIN_EDGE_FRACTION","0.05",1)!=0)
+            if (!set_env("TRELLIS_QEM_PRESERVE_TOPOLOGY","1") ||
+                !set_env("TRELLIS_QEM_COLLISION_GUARD","1") ||
+                !set_env("TRELLIS_REMESH_TETS","1") ||
+                !set_env("TRELLIS_TETS_MIN_EDGE_FRACTION","0.05"))
                 throw std::runtime_error("Cannot configure guarded geometry preparation");
             const fs::path initial=prefix.string()+"-initial.post";
             prepared=prefix.string()+"-prepared.post";

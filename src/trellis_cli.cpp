@@ -18,10 +18,12 @@
 #include "mesh_shape.h"
 #include "stb_image_write.h"
 #include "trellis_run.h"
+#include "retopo_process.h"
 #include "ggml.h"   // proj_in_channels is read straight off the checkpoint's proj_linear weight
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <random>
 #include <vector>
 #include <string>
@@ -70,8 +72,8 @@ int trellis_run(const trellis::TrellisParams& cfg) {
     namespace fs = std::filesystem;
     fs::path retopo_driver, retopo_run;
     if (cfg.retopo) {
-#ifndef __linux__
-        fprintf(stderr,"[trellis] native retopo launch is currently supported on Linux only\n");
+#if !defined(__linux__) && !defined(_WIN32)
+        fprintf(stderr,"[trellis] native retopo launch is supported on Linux and Windows\n");
         return 1;
 #else
         if (!cfg.texture || cfg.bg_only || std::getenv("TRELLIS_STOP_AFTER_POST_DUMP")) {
@@ -85,8 +87,14 @@ int trellis_run(const trellis::TrellisParams& cfg) {
             return 1;
         }
         std::error_code ec;
+#ifdef _WIN32
+        retopo_driver=trellis::retopo_process::executable_directory()/"trellis-retopo-atlas.exe";
+        const bool driver_available=fs::is_regular_file(retopo_driver,ec);
+#else
         retopo_driver=fs::canonical("/proc/self/exe",ec).parent_path()/"trellis-retopo-atlas";
-        if (ec || access(retopo_driver.c_str(),X_OK)!=0) {
+        const bool driver_available=!ec && access(retopo_driver.c_str(),X_OK)==0;
+#endif
+        if (ec || !driver_available) {
             fprintf(stderr,"[trellis] retopo driver unavailable: %s\n",retopo_driver.c_str());
             return 1;
         }
@@ -96,6 +104,21 @@ int trellis_run(const trellis::TrellisParams& cfg) {
             fprintf(stderr,"[trellis] cannot create retopo workdir: %s\n",ec.message().c_str());
             return 1;
         }
+#ifdef _WIN32
+        std::random_device random;
+        bool created=false;
+        for (int attempt=0;attempt<64 && !created;++attempt) {
+            const uint64_t nonce=(uint64_t(random())<<32)|random();
+            retopo_run=root/("run-"+std::to_string(nonce));
+            created=fs::create_directory(retopo_run,ec);
+            if (ec && ec!=std::errc::file_exists) break;
+            ec.clear();
+        }
+        if (!created) {
+            fprintf(stderr,"[trellis] cannot create retopo run directory: %s\n",ec.message().c_str());
+            return 1;
+        }
+#else
         std::string pattern=(root/"run-XXXXXX").string();
         std::vector<char> mutable_pattern(pattern.begin(),pattern.end());
         mutable_pattern.push_back('\0');
@@ -105,6 +128,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
             return 1;
         }
         retopo_run=created;
+#endif
 #endif
     }
     // Unbuffered, not line-buffered: MSVCRT treats _IOLBF as full buffering, which
@@ -713,7 +737,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         }
         fs::path retopo_post;
         if (cfg.retopo) {
-#ifdef __linux__
+#if defined(__linux__) || defined(_WIN32)
             retopo_post=retopo_run/"source.post";
             if (!dump_post(retopo_post.c_str())) {
                 fprintf(stderr,"[trellis] failed writing retopo POST %s\n",retopo_post.c_str());
@@ -747,13 +771,32 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         }
         if (std::getenv("TRELLIS_STOP_AFTER_POST_DUMP")) return 0;
         if (cfg.retopo) {
-#ifdef __linux__
+#if defined(__linux__) || defined(_WIN32)
             const fs::path quad_glb=retopo_run/"model.glb";
             std::vector<std::string> args={retopo_driver.string(),"--from-post",retopo_post.string(),
                 quad_glb.string(),std::to_string(cfg.retopo_grid),
                 std::to_string(cfg.retopo_first_faces),std::to_string(cfg.retopo_final_faces),
                 std::to_string(cfg.retopo_atlas)};
             if (cfg.retopo_no_weld_fill) args.emplace_back("--no-weld-fill");
+#ifdef _WIN32
+            std::vector<std::pair<std::wstring,std::wstring>> child_env={
+                {L"TEMP",retopo_run.wstring()},{L"TMP",retopo_run.wstring()},
+                {L"TRELLIS_RETOPO_SEED",std::to_wstring(run_seed)},
+                {L"TRELLIS_RETOPO_COPYRIGHT",trellis::retopo_process::wide(cfg.copyright)},
+                {L"TRELLIS_RETOPO_PBR_POST",L""}};
+            if (cfg.retopo_dual_pbr)
+                child_env.emplace_back(L"TRELLIS_RETOPO_PBR_POST",
+                    trellis::retopo_process::wide(retopo_dual_post));
+            int status=1;
+            try {
+                status=trellis::retopo_process::run(retopo_driver,
+                    {args.begin()+1,args.end()},child_env);
+            } catch (const std::exception& error) {
+                fprintf(stderr,"[trellis] cannot launch retopo driver: %s\n",error.what());
+                return 1;
+            }
+            const bool stage_ok=status==0;
+#else
             std::vector<char*> raw;
             for (auto& arg:args) raw.push_back(arg.data());
             raw.push_back(nullptr);
@@ -782,7 +825,10 @@ int trellis_run(const trellis::TrellisParams& cfg) {
                 return 1;
             }
             int status=0;
-            if (waitpid(child,&status,0)<0 || !WIFEXITED(status) || WEXITSTATUS(status)!=0 ||
+            const bool stage_ok=waitpid(child,&status,0)>=0 && WIFEXITED(status) &&
+                                WEXITSTATUS(status)==0;
+#endif
+            if (!stage_ok ||
                 !fs::is_regular_file(quad_glb) ||
                 !fs::is_regular_file(retopo_run/"model.retopo-accepted.json")) {
                 fprintf(stderr,"[trellis] retopo failed; diagnostics in %s\n",retopo_run.c_str());
@@ -795,14 +841,25 @@ int trellis_run(const trellis::TrellisParams& cfg) {
                 fprintf(stderr,"[trellis] cannot create output directory: %s\n",ec.message().c_str());
                 return 1;
             }
+#ifdef _WIN32
+            const fs::path staged=destination.string()+".retopo-staged-"+
+                                  std::to_string(GetCurrentProcessId());
+#else
             const fs::path staged=destination.string()+".retopo-staged-"+std::to_string(getpid());
+#endif
             fs::copy_file(quad_glb,staged,fs::copy_options::overwrite_existing,ec);
             if (ec) {
                 fprintf(stderr,"[trellis] cannot stage retopo GLB: %s\n",ec.message().c_str());
                 fs::remove(staged);
                 return 1;
             }
+#ifdef _WIN32
+            if (!MoveFileExW(staged.c_str(),destination.c_str(),
+                             MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
+                ec=std::error_code(GetLastError(),std::system_category());
+#else
             fs::rename(staged,destination,ec);
+#endif
             if (ec) {
                 fprintf(stderr,"[trellis] cannot publish retopo GLB: %s\n",ec.message().c_str());
                 fs::remove(staged);

@@ -108,13 +108,15 @@ The default is the **1024 cascade** (LR `flow_512` → upsample → HR `flow_102
 res-1024 decode, sharper geometry); `--res 512` selects the lighter res-512 path.
 All behavior is driven by CLI flags — run `trellis-cli --help` for the full list.
 
-For an optional all-quad textured export on Linux, build with both retopology
-options enabled. CMake downloads pinned LEMON, CGAL, Boost, GMP, and MPFR sources
-and builds the required libraries with the project; no separate dependency paths
-or installs are needed. Building `trellis-cli` also builds the retopology driver
-and its helper executables. The prebuilt release binaries omit this optional path.
+For an optional all-quad textured export on Linux or Windows, build with both
+retopology options enabled. CMake downloads pinned LEMON, CGAL, and Boost sources.
+Linux additionally builds GMP and MPFR; Windows uses CGAL's Boost Multiprecision
+backend. No separate dependency paths or installs are needed. Building
+`trellis-cli` also builds the retopology driver and its helper executables. The
+prebuilt release binaries omit this optional path.
 
 ```bash
+# Linux
 cmake -S . -B build -DGGML_VULKAN=ON \
   -DTRELLIS_RETOPO_MATCHING=ON -DTRELLIS_RETOPO_COLLISION=ON
 cmake --build build --target trellis-cli -j
@@ -125,8 +127,20 @@ TMPDIR="$PWD/out/retopo-work" ./build/trellis-cli assets/goblin.png out/goblin-q
   --retopo-atlas 4096 --retopo-workdir out/retopo-work
 ```
 
+```powershell
+# Windows x64, in an MSVC developer PowerShell with Ninja and the Vulkan SDK
+cmake -S . -B build-retopo -G Ninja -DGGML_VULKAN=ON -DGGML_OPENMP=OFF `
+  -DTRELLIS_RETOPO_MATCHING=ON -DTRELLIS_RETOPO_COLLISION=ON
+cmake --build build-retopo --target trellis-cli --parallel
+New-Item -ItemType Directory -Force out/retopo-work | Out-Null
+.\build-retopo\trellis-cli.exe assets/goblin.png out/goblin-quads.glb `
+  --models C:\path\to\gguf --seed 42 --res 1024 --tex-res 512 `
+  --retopo 512 0 900000 --retopo-no-weld-fill --retopo-dual-pbr `
+  --retopo-atlas 4096 --retopo-workdir out/retopo-work
+```
+
 The three `--retopo` numbers select the tetra remesh grid, initial QEM face
-target (zero preserves the full shell), and final QEM face target. This
+target (zero preserves the full shell), and final QEM face target. On Linux, this
 configuration passed a full Vulkan goblin run; a thin-feature humanoid passed
 with the same 512-grid, no-weld preparation. `--retopo-dual-pbr` requires
 `--res 1024 --tex-res 512`: it decodes a 1024-resolution PBR field for the
