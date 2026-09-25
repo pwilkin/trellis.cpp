@@ -6,9 +6,13 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag to attach binaries to (e.g. v0.1.0)"
+        description: "Release tag to attach binaries to (e.g. v0.8.1)"
         required: true
-        default: "v0.1.0"
+        default: "v0.8.1"
+      verify_windows_retopo:
+        description: "Build and smoke-test optional Windows retopology without uploading assets"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -18,7 +22,43 @@ permissions:
 # cuda12 is an additional legacy artifact selected by the standalone installer
 # for Pascal/Volta devices; it does not replace Lemonade's current-CUDA asset.
 jobs:
+  windows-retopo-preflight:
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_windows_retopo == true
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: seanmiddleditch/gha-setup-ninja@v5
+      - name: Build optional retopology
+        shell: pwsh
+        run: |
+          cmake -S . -B build-retopo -G Ninja -DGGML_OPENMP=OFF -DTRELLIS_RETOPO_MATCHING=ON -DTRELLIS_RETOPO_COLLISION=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build-retopo --target trellis-cli trellis-test-quad-topology trellis-test-quad-component-cover --parallel 2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\build-retopo\trellis-test-quad-topology.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\build-retopo\trellis-test-quad-component-cover.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Smoke-test stage launch and paths with spaces
+        shell: pwsh
+        run: |
+          $work = Join-Path $PWD 'retopo smoke'
+          New-Item -ItemType Directory -Force $work | Out-Null
+          New-Item -ItemType File -Force (Join-Path $work 'source.post') | Out-Null
+          @('v 0 0 0', 'v 1 0 0', 'v 1 1 0', 'v 0 1 0', 'f 1 2 3 4') |
+            Set-Content (Join-Path $work 'quad.obj')
+          .\build-retopo\trellis-retopo-atlas.exe (Join-Path $work 'source.post') (Join-Path $work 'quad.obj') (Join-Path $work 'output.glb') 1024
+          if ($LASTEXITCODE -eq 0) { throw 'Invalid smoke fixture was unexpectedly accepted' }
+          if (-not (Test-Path (Join-Path $work 'output.retopo-topology.log'))) {
+            throw 'Retopology driver did not launch the topology auditor'
+          }
+          $global:LASTEXITCODE = 0
+
   build:
+    if: github.event_name != 'workflow_dispatch' || inputs.verify_windows_retopo != true
     name: ${{ matrix.os }} · ${{ matrix.release_backend || matrix.backend }}
     runs-on: ${{ matrix.runner }}
     continue-on-error: ${{ matrix.experimental == true }}
@@ -260,6 +300,7 @@ jobs:
   #   trellis-studio-linux-x86_64.AppImage / trellis-studio-linux-amd64.deb
   #   trellis-studio-windows-x64.msi
   studio:
+    if: github.event_name != 'workflow_dispatch' || inputs.verify_windows_retopo != true
     name: ${{ matrix.os }} · Trellis Studio app
     runs-on: ${{ matrix.runner }}
     strategy:
