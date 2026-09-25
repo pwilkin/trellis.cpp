@@ -95,7 +95,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         const bool driver_available=!ec && access(retopo_driver.c_str(),X_OK)==0;
 #endif
         if (ec || !driver_available) {
-            fprintf(stderr,"[trellis] retopo driver unavailable: %s\n",retopo_driver.c_str());
+            fprintf(stderr,"[trellis] retopo driver unavailable: %s\n",retopo_driver.string().c_str());
             return 1;
         }
         const fs::path root=fs::absolute(cfg.retopo_workdir);
@@ -739,11 +739,11 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         if (cfg.retopo) {
 #if defined(__linux__) || defined(_WIN32)
             retopo_post=retopo_run/"source.post";
-            if (!dump_post(retopo_post.c_str())) {
-                fprintf(stderr,"[trellis] failed writing retopo POST %s\n",retopo_post.c_str());
+            if (!dump_post(retopo_post.string().c_str())) {
+                fprintf(stderr,"[trellis] failed writing retopo POST %s\n",retopo_post.string().c_str());
                 return 1;
             }
-            printf("      [retopo] POST and intermediates -> %s\n",retopo_run.c_str());
+            printf("      [retopo] POST and intermediates -> %s\n",retopo_run.string().c_str());
 #endif
         }
         if (dual_pbr_path) {
@@ -831,7 +831,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
             if (!stage_ok ||
                 !fs::is_regular_file(quad_glb) ||
                 !fs::is_regular_file(retopo_run/"model.retopo-accepted.json")) {
-                fprintf(stderr,"[trellis] retopo failed; diagnostics in %s\n",retopo_run.c_str());
+                fprintf(stderr,"[trellis] retopo failed; diagnostics in %s\n",retopo_run.string().c_str());
                 return 1;
             }
             std::error_code ec;
@@ -866,7 +866,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
                 return 1;
             }
             printf("done in %.1fs -> %s (quad audit: %s)\n",now()-t0,
-                   outglb.c_str(),(retopo_run/"model.retopo-accepted.json").c_str());
+                   outglb.c_str(),(retopo_run/"model.retopo-accepted.json").string().c_str());
             return 0;
 #endif
         }
