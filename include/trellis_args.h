@@ -164,4 +164,14 @@ bool parse_faces_arg(const char* value, TrellisParams& p, std::string& error);
 // full mesh) rather than silently ignoring it. Call after all params are applied.
 bool check_faces_compat(const TrellisParams& p, std::string& error);
 
+// ---- UV atlas size (--atlas / server field "atlas") ----
+// Side length in px of the square textures baked onto the mesh (base color + metallic/
+// roughness). Default 2048 for the cascade, 1024 at res 512 (trellis_cli.cpp, `T`).
+constexpr int kAtlasMin = 256;
+constexpr int kAtlasMax = 8192;     // 8192^2 RGBA is already ~256 MB per map while baking
+
+// Parse an atlas size ("2048"; "auto" restores the default). Shared by the CLI's --atlas
+// and trellis-server's "atlas" field, like parse_faces_arg.
+bool parse_atlas_arg(const char* value, TrellisParams& p, std::string& error);
+
 }  // namespace trellis

@@ -8,7 +8,8 @@
 //                      DC remesh band width, default 1 — see --band), "model"
 //                      (trellis|pixal3d — one directory holds both), "faces"
 //                      (QEM decimation face target, >= 1000 or "auto" — see
-//                      --faces), and for
+//                      --faces), "atlas" (UV atlas px, 256..8192 or "auto"),
+//                      "webp" (on|off; off = PNG textures), and for
 //                      pixal3d the camera: "fov" (degrees), "mesh_scale",
 //                      "extend_pixel", "texture" (on|off; off = geometry
 //                      only, like --no-texture), and "normal_map" (on|off;
@@ -111,6 +112,14 @@ int main(int argc, char** argv) {
         if (req.has_file("bg_removal")) p.birefnet = (req.get_file_value("bg_removal").content == "birefnet") ? 1 : 0;
         if (req.has_file("uv")) p.xatlas = (req.get_file_value("uv").content == "xatlas");
         if (req.has_file("band")) p.band = atoi(req.get_file_value("band").content.c_str());
+        if (req.has_file("atlas")) {
+            std::string error;
+            if (!trellis::parse_atlas_arg(req.get_file_value("atlas").content.c_str(), p, error)) {
+                res.status = 400;
+                res.set_content(error + "\n", "text/plain");
+                return;
+            }
+        }
         if (req.has_file("faces")) {
             std::string error;
             if (!trellis::parse_faces_arg(req.get_file_value("faces").content.c_str(), p, error) ||
@@ -178,10 +187,11 @@ int main(int argc, char** argv) {
                 res.set_content("{\"error\":\"failed to stage input image\"}", "application/json");
                 return;
             }
-            fprintf(stderr, "[trellis-server] generate: %zu-byte image, seed %u, res %s, bg %s, uv %s, faces %d, texture %s\n",
+            fprintf(stderr, "[trellis-server] generate: %zu-byte image, seed %u, res %s, bg %s, uv %s, faces %d, atlas %s, webp %s, texture %s\n",
                     image.content.size(), p.seed, p.cascade ? std::to_string(p.hr_res).c_str() : "512",
                     p.birefnet < 0 ? "auto" : (p.birefnet ? "birefnet" : "threshold"), p.xatlas ? "xatlas" : "box",
-                    trellis::qem_face_target(p), p.texture ? "on" : "off");
+                    trellis::qem_face_target(p), p.tex > 0 ? std::to_string(p.tex).c_str() : "auto",
+                    p.webp < 0 ? "auto" : (p.webp ? "on" : "off"), p.texture ? "on" : "off");
             try {
                 int rc = trellis_run(p);
                 if (rc == 0) glb = read_file_bytes(p.output);
