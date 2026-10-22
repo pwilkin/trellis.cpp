@@ -1,9 +1,18 @@
 // BiRefNet background removal (Swin-L backbone + ASPPDeformable decoder) in GGML.
 #pragma once
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace trellis {
 struct Model;
+
+// Thrown when a BiRefNet graph does not fit on the model's backend (what(): backend, size,
+// free/total device memory). Distinct from other failures so callers can retry on another
+// backend instead of giving up.
+struct BirefnetAllocError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
 
 // Swin-L backbone. Input chw = [3,S,S] (S=1024 or 512), ImageNet-normalized, ggml-loadable as
 // [S,S,3]. Returns the 4 stage outputs (post per-stage LayerNorm), each in torch [C,H,W] order.
