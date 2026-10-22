@@ -959,24 +959,47 @@ int trellis_run(const trellis::TrellisParams& cfg) {
                    smoothed.maximum_displacement);
         }
         const int dV = (int)dv.size()/3, dF = (int)df.size()/3;
+        // --normal-map: a second BVH over the remeshed shell (not the decoded `mesh`, whose
+        // sub-voxel outer-skin noise the band offset exists to absorb, issue #22) gives the
+        // bake a dense normal per texel; the decimated mesh keeps the shell's surface detail
+        // at any face budget. Search radius 32 voxels: texels farther from the shell than
+        // that (QEM error) fall back to the flat normal and are counted in the log.
+        trellis::TriBvh nbvh;
+        trellis::NormalSource nsrc;
+        if (cfg.normal_map && rm.F() > 0) {
+            const double tn0 = now();
+            nbvh = trellis::TriBvh::build(rm.verts.data(), rm.V(), rm.faces.data(), rm.F());
+            nsrc = trellis::NormalSource{&nbvh, rm.verts.data(), rm.faces.data(), 32.0f / (float)so.res};
+            printf("  normal map: BVH over the remeshed shell (F=%d) in %.1fs\n", rm.F(), now() - tn0);
+            fflush(stdout);
+        } else if (cfg.normal_map) {
+            printf("  normal map: skipped (remesh empty, no dense shell to bake from)\n");
+        }
+        const trellis::NormalSource* nsp = nsrc.ok() ? &nsrc : nullptr;
         // Texels are shaded straight from the per-voxel PBR volume (trilinear sampling, the
         // reference bake behavior) rather than from decimation-averaged vertex colors, so
         // full material detail survives simplification.
         trellis::VoxelPbr vox{pbr_coords, &pbr6, pbr_res, &bvh};
         const std::vector<float> no_vp;
-        trellis::BakedMesh bm = boxuv ? trellis::uv_box_project(dv, dV, df, dF, no_vp, T, &vox)
-                                      : trellis::uv_bake(dv, dV, df, dF, no_vp, T, &vox);
-        if (!boxuv && !bm.ok()) bm = trellis::uv_chart_project(dv, dV, df, dF, no_vp, T, &vox);
+        trellis::BakedMesh bm = boxuv ? trellis::uv_box_project(dv, dV, df, dF, no_vp, T, &vox, nsp)
+                                      : trellis::uv_bake(dv, dV, df, dF, no_vp, T, &vox, nsp);
+        if (!boxuv && !bm.ok()) bm = trellis::uv_chart_project(dv, dV, df, dF, no_vp, T, &vox, nsp);
         if (bm.ok()) {
             trellis::write_glb_textured(outglb.c_str(), bm.verts.data(), (int64_t)bm.verts.size()/3, bm.uv.data(),
                                         bm.faces.data(), (int64_t)bm.faces.size()/3, bm.base.data(), bm.mr.data(), bm.T,
                                         /*double_sided=*/rm.F() == 0, run_seed,
                                         cfg.copyright.empty() ? nullptr : cfg.copyright.c_str(),
-                                        /*use_webp=*/cfg.webp != 0);
+                                        /*use_webp=*/cfg.webp != 0,
+                                        bm.nrm.empty() ? nullptr : bm.nrm.data(),
+                                        bm.tangents.empty() ? nullptr : bm.tangents.data());
             std::string tex = outglb.substr(0, outglb.find_last_of('.')) + "_base.png";
             stbi_write_png(tex.c_str(), bm.T, bm.T, 4, bm.base.data(), bm.T*4);
+            if (!bm.nrm.empty()) {
+                std::string ntex = outglb.substr(0, outglb.find_last_of('.')) + "_normal.png";
+                stbi_write_png(ntex.c_str(), bm.T, bm.T, 4, bm.nrm.data(), bm.T*4);
+            }
             textured = true;
-            printf("      textured GLB (atlas %d, +%s)\n", bm.T, tex.c_str());
+            printf("      textured GLB (atlas %d, +%s%s)\n", bm.T, tex.c_str(), bm.nrm.empty() ? "" : ", +normal map");
         } else printf("      uv_bake failed; falling back to vertex colors\n");
     }
     if (cfg.retopo && !textured) {

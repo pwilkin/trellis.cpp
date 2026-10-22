@@ -13,11 +13,27 @@ struct BakedMesh {
     std::vector<int32_t> faces;   // [Fo*3]
     std::vector<uint8_t> base;    // [T*T*4] RGBA base color
     std::vector<uint8_t> mr;      // [T*T*4] RGBA glTF metallic-roughness (G=rough, B=metal)
+    std::vector<uint8_t> nrm;     // [T*T*4] RGBA tangent-space normal map (glTF: +Y = up the image);
+                                  //   empty unless a NormalSource was given
+    std::vector<float>   tangents;// [Vo*4] xyz + handedness w (glTF TANGENT); empty unless baked
     int T = 0;
     bool ok() const { return T > 0 && !faces.empty(); }
 };
 
 class TriBvh;
+
+// Dense high-poly surface to bake a tangent-space normal map from: the narrow-band
+// remeshed shell (watertight, smooth) and a BVH over it. Each shaded texel takes the
+// normal of the closest shell triangle, expressed in the decimated mesh's per-vertex
+// tangent frame (glTF convention: bitangent = cross(N, T) * w, which points toward
+// decreasing v, i.e. up the image). Lets a 25K-face mesh shade like the dense one.
+struct NormalSource {
+    const TriBvh*  bvh   = nullptr;
+    const float*   verts = nullptr;   // [V*3], TRELLIS space (same as the baked mesh)
+    const int32_t* faces = nullptr;   // [F*3]
+    float max_dist = 0.f;             // closest-point search radius (0 = unbounded)
+    bool ok() const { return bvh && verts && faces; }
+};
 
 // Sparse per-voxel PBR field at grid resolution `res` (mesh space [-0.5,0.5]^3;
 // voxel i covers [i/res-0.5, (i+1)/res-0.5)). feats layout [N*6] in [0,1]:
@@ -94,19 +110,32 @@ int weld_vertices(std::vector<float>& verts, std::vector<int32_t>& faces,
 // Unwraps with xatlas, shades texels from `vox` (trilinear volume sampling) when provided,
 // else from interpolated per-vertex PBR; dilates seams.
 BakedMesh uv_bake(const std::vector<float>& verts, int V, const std::vector<int32_t>& faces, int F,
-                  const std::vector<float>& pbr6, int texsize, const VoxelPbr* vox = nullptr);
+                  const std::vector<float>& pbr6, int texsize, const VoxelPbr* vox = nullptr,
+                  const NormalSource* nsrc = nullptr);
 
 // Voxel-native box (cube) projection atlas — no xatlas, no chart computation. Faces are
 // assigned to the axis-aligned plane (of 6) along which they are visible, with a second-layer
 // chart set for occluded faces; texels are shaded from `vox` when provided (else per-vertex
 // PBR) with a depth-tested raster. O(F) — fast even for the undecimated res-1024 cascade mesh.
 BakedMesh uv_box_project(const std::vector<float>& verts, int V, const std::vector<int32_t>& faces, int F,
-                         const std::vector<float>& pbr6, int texsize, const VoxelPbr* vox = nullptr);
+                         const std::vector<float>& pbr6, int texsize, const VoxelPbr* vox = nullptr,
+                         const NormalSource* nsrc = nullptr);
 
 // Normal-clustered planar charts + shelf packing: deterministic unwrap with
 // area-proportional texel density. Fallback when xatlas times out or is skipped.
 BakedMesh uv_chart_project(const std::vector<float>& verts, int V, const std::vector<int32_t>& faces, int F,
-                           const std::vector<float>& pbr6, int texsize, const VoxelPbr* vox = nullptr);
+                           const std::vector<float>& pbr6, int texsize, const VoxelPbr* vox = nullptr,
+                           const NormalSource* nsrc = nullptr);
+
+// Normal-map bake on an already-unwrapped BakedMesh (verts/uv/faces/T set). `owner` is
+// one int per texel: the index of the face that shaded it, or -1. Fills bm.nrm (dilated
+// into the gutters) and bm.tangents. The three unwrappers above call this themselves
+// when given a NormalSource; it is exposed for tests and external post-processing.
+void bake_normals(BakedMesh& bm, const std::vector<int32_t>& owner, const NormalSource& src);
+
+// Owner buffer for bake_normals from the mesh's own UV layout, no depth test (for
+// unwraps with unique chart space such as xatlas, and for tests).
+std::vector<int32_t> rasterize_owner(const BakedMesh& bm);
 
 struct PresetUvBakeStats {
     size_t covered_texels = 0;

@@ -139,6 +139,8 @@ void print_usage(const char* argv0, bool server) {
         "                          a dense res-1024 decode to a clean res-512 PBR volume)\n"
         "      --webp on|off       encode GLB textures as WebP (default: on when built with\n"
         "                          WebP support; off = PNG)\n"
+        "      --normal-map on|off bake a tangent-space normal map from the dense remeshed\n"
+        "                          shell onto the decimated mesh (3rd GLB texture; default off)\n"
         "      --dump-bg           also write the background-removal cutout as <out>_cutout.png\n"
         "      --dump-post PATH    write the raw decoded mesh + sparse PBR volume to PATH and\n"
         "                          exit (skips remesh/decimate/UV/bake/GLB) -- for external\n"
@@ -236,6 +238,10 @@ bool parse_args(int argc, char** argv, TrellisParams& p) {
         else if (a == "--webp")                 { const char* v = need(a.c_str()); if (!v) return false;
                                                   p.webp = (std::strcmp(v,"off")==0 || std::strcmp(v,"0")==0 || std::strcmp(v,"false")==0) ? 0
                                                          : (std::strcmp(v,"on")==0 || std::strcmp(v,"1")==0 || std::strcmp(v,"true")==0) ? 1 : -1; }
+        else if (a == "--normal-map")           { const char* v = need(a.c_str()); if (!v) return false;
+                                                  if      (std::strcmp(v,"on")==0  || std::strcmp(v,"1")==0 || std::strcmp(v,"true")==0)  p.normal_map = 1;
+                                                  else if (std::strcmp(v,"off")==0 || std::strcmp(v,"0")==0 || std::strcmp(v,"false")==0) p.normal_map = 0;
+                                                  else { fprintf(stderr, "[trellis] --normal-map must be on or off\n"); return false; } }
         else if (a == "--dump-bg")              { p.dump_bg = true; }
         else if (a == "--bg-only")              { p.bg_only = true; p.dump_bg = true; }
         else if (a == "--retopo")               { const char* g=need(a.c_str()); if (!g) return false;
