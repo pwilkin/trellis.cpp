@@ -85,6 +85,9 @@ struct TrellisParams {
                                 //   512, whose clean coarse PBR bakes onto the res-1024 mesh
                                 //   without the partial-coverage "skin" speckle); else force 512/1024
     int  webp     = -1;         // GLB texture encoding: -1 auto (WebP if built with it), 1 on, 0 off (PNG)
+    int  normal_map = 0;        // bake a tangent-space normal map from the remeshed shell onto the
+                                //   decimated mesh and add it to the GLB as a third texture
+                                //   (--normal-map on|off, server "normal_map"; default off)
     bool f32      = false;      // f32 sparse-conv compute
     bool no_fa    = false;      // disable FlashAttention (manual softmax)
     int  fa_fast  = -1;         // FA precision: -1 auto (fast on HTP), 0 BF16/F32, 1 F16/fast

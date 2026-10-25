@@ -10,8 +10,10 @@
 //                      (QEM decimation face target, >= 1000 or "auto" — see
 //                      --faces), and for
 //                      pixal3d the camera: "fov" (degrees), "mesh_scale",
-//                      "extend_pixel", and "texture" (on|off; off = geometry
-//                      only, like --no-texture). Returns model/gltf-binary.
+//                      "extend_pixel", "texture" (on|off; off = geometry
+//                      only, like --no-texture), and "normal_map" (on|off;
+//                      on = bake a tangent-space normal map, like --normal-map).
+//                      Returns model/gltf-binary.
 //
 // Launch-time defaults come from CLI flags (see trellis::parse_args);
 // each request copies those defaults and applies its own overrides. The model
@@ -143,6 +145,12 @@ int main(int argc, char** argv) {
             if      (t == "off" || t == "0" || t == "false") p.texture = false;
             else if (t == "on"  || t == "1" || t == "true")  p.texture = true;
             else { res.status = 400; res.set_content("texture must be on or off\n", "text/plain"); return; }
+        }
+        if (req.has_file("normal_map")) {
+            const std::string& n = req.get_file_value("normal_map").content;
+            if      (n == "off" || n == "0" || n == "false") p.normal_map = 0;
+            else if (n == "on"  || n == "1" || n == "true")  p.normal_map = 1;
+            else { res.status = 400; res.set_content("normal_map must be on or off\n", "text/plain"); return; }
         }
         if (req.has_file("webp")) {
             const std::string& w = req.get_file_value("webp").content;

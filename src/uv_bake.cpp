@@ -4,6 +4,7 @@
 #include "meshoptimizer.h"
 #include "Simplify.h"
 #include "tri_bvh.h"
+#include "mesh_glb.h"
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
@@ -674,7 +675,8 @@ int fill_small_holes(std::vector<int32_t>& faces, int max_loop) {
 // meshes xatlas cannot handle (its chart optimization wedges unrecoverably on
 // heavily-greebled geometry regardless of face count).
 BakedMesh uv_chart_project(const std::vector<float>& verts, int V, const std::vector<int32_t>& faces, int F,
-                           const std::vector<float>& pbr6, int texsize, const VoxelPbr* vox) {
+                           const std::vector<float>& pbr6, int texsize, const VoxelPbr* vox,
+                           const NormalSource* nsrc) {
     BakedMesh out;
     const int T = texsize;
     if (F == 0) return out;
@@ -803,6 +805,8 @@ BakedMesh uv_chart_project(const std::vector<float>& verts, int V, const std::ve
     out.T = T; out.base.assign((size_t)T*T*4, 0); out.mr.assign((size_t)T*T*4, 0);
     std::vector<uint8_t> mask((size_t)T*T, 0);
     std::vector<float> zbuf((size_t)T*T, -1e30f);
+    std::vector<int32_t> owner;
+    if (nsrc && nsrc->ok()) owner.assign((size_t)T*T, -1);
     std::vector<int> fc2((size_t)Fo);
     { int fo = 0; for (size_t c = 0; c < charts.size(); ++c) for (size_t i = 0; i < charts[c].size(); ++i) fc2[fo++] = (int)c; }
     auto u8 = [](float x){ x = x*255.f; return (uint8_t)(x < 0 ? 0 : (x > 255 ? 255 : x)); };
@@ -842,8 +846,10 @@ BakedMesh uv_chart_project(const std::vector<float>& verts, int V, const std::ve
             out.base[4*t+0]=u8(s6[0]); out.base[4*t+1]=u8(s6[1]); out.base[4*t+2]=u8(s6[2]); out.base[4*t+3]=u8(s6[5]);
             out.mr[4*t+0]=0; out.mr[4*t+1]=u8(s6[4]); out.mr[4*t+2]=u8(s6[3]); out.mr[4*t+3]=255;
             mask[t]=1;
+            if (!owner.empty()) owner[t]=f;
         }
     }
+    if (!owner.empty()) bake_normals(out, owner, *nsrc);
     dilate_full(out.base, out.mr, mask, T);
     printf("  uv_chart_project: atlas %dx%d, charts=%zu, Vo=%zu Fo=%d (scale %.1f tex/unit)\n",
            T, T, charts.size(), out.verts.size()/3, Fo, scale);
@@ -852,7 +858,8 @@ BakedMesh uv_chart_project(const std::vector<float>& verts, int V, const std::ve
 }
 
 BakedMesh uv_bake(const std::vector<float>& verts, int V, const std::vector<int32_t>& faces, int F,
-                  const std::vector<float>& pbr6, int texsize, const VoxelPbr* vox) {
+                  const std::vector<float>& pbr6, int texsize, const VoxelPbr* vox,
+                  const NormalSource* nsrc) {
     BakedMesh out;
     std::unique_ptr<VoxSampler> vs;
     if (vox && vox->ok()) vs.reset(new VoxSampler(*vox));
@@ -1355,6 +1362,8 @@ BakedMesh uv_bake(const std::vector<float>& verts, int V, const std::vector<int3
     out.base.assign((size_t)T * T * 4, 0);
     out.mr.assign((size_t)T * T * 4, 0);
     std::vector<uint8_t> mask((size_t)T * T, 0);
+    std::vector<int32_t> owner;
+    if (nsrc && nsrc->ok()) owner.assign((size_t)T * T, -1);
     auto u8 = [](float v){ v = v*255.f; return (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v)); };
     for (int f = 0; f < FoAll; ++f) {
         int idx[3] = { (int)out.faces[3*f], (int)out.faces[3*f+1], (int)out.faces[3*f+2] };
@@ -1388,11 +1397,13 @@ BakedMesh uv_bake(const std::vector<float>& verts, int V, const std::vector<int3
                 out.base[4*t+0]=u8(s[0]); out.base[4*t+1]=u8(s[1]); out.base[4*t+2]=u8(s[2]); out.base[4*t+3]=u8(s[5]);
                 out.mr[4*t+0]=0; out.mr[4*t+1]=u8(s[4]); out.mr[4*t+2]=u8(s[3]); out.mr[4*t+3]=255;
                 mask[t] = 1;
+                if (!owner.empty()) owner[t] = f;
             }
         }
     }
     xatlas::Destroy(atlas);
 
+    if (!owner.empty()) bake_normals(out, owner, *nsrc);
     telea_inpaint(out.base, out.mr, mask, T, 3, 1);
     printf("  uv_bake: atlas %dx%d (xatlas %dx%d), Vo=%zu Fo=%d\n", T, T, W, H, out.verts.size()/3, FoAll);
     fflush(stdout);
@@ -1400,7 +1411,8 @@ BakedMesh uv_bake(const std::vector<float>& verts, int V, const std::vector<int3
 }
 
 BakedMesh uv_box_project(const std::vector<float>& verts, int V, const std::vector<int32_t>& faces, int F,
-                         const std::vector<float>& pbr6, int texsize, const VoxelPbr* vox) {
+                         const std::vector<float>& pbr6, int texsize, const VoxelPbr* vox,
+                         const NormalSource* nsrc) {
     BakedMesh out;
     const int T = texsize;
     if (F == 0) return out;
@@ -1565,6 +1577,8 @@ BakedMesh uv_box_project(const std::vector<float>& verts, int V, const std::vect
     out.T = T; out.base.assign((size_t)T*T*4,0); out.mr.assign((size_t)T*T*4,0);
     std::vector<uint8_t> mask((size_t)T*T,0);
     std::vector<float> zbuf((size_t)T*T, -1e30f);
+    std::vector<int32_t> owner;
+    if (nsrc && nsrc->ok()) owner.assign((size_t)T*T, -1);
     std::vector<int> fgroup((size_t)Fo);
     { int fo = 0; for (int g = 0; g < NB; ++g) for (size_t i = 0; i < bfaces[g].size(); ++i) fgroup[fo++] = g; }
     auto u8 = [](float v){ v=v*255.f; return (uint8_t)(v<0?0:(v>255?255:v)); };
@@ -1605,8 +1619,10 @@ BakedMesh uv_box_project(const std::vector<float>& verts, int V, const std::vect
             out.base[4*t+0]=u8(s[0]); out.base[4*t+1]=u8(s[1]); out.base[4*t+2]=u8(s[2]); out.base[4*t+3]=u8(s[5]);
             out.mr[4*t+0]=0; out.mr[4*t+1]=u8(s[4]); out.mr[4*t+2]=u8(s[3]); out.mr[4*t+3]=255;
             mask[t]=1;
+            if (!owner.empty()) owner[t]=f;
         }
     }
+    if (!owner.empty()) bake_normals(out, owner, *nsrc);
     // 5) seam dilation
     dilate_full(out.base, out.mr, mask, T);
     printf("  uv_box_project: atlas %dx%d, Vo=%d Fo=%d (6 planes, %d re-bucketed, %d occluded-layer)\n",
@@ -1681,6 +1697,239 @@ PresetUvBakeStats bake_preset_uv(BakedMesh& mesh, const VoxelPbr& vox) {
     if (!stats.covered_texels) throw std::runtime_error("No preset UV texels sampled from PBR volume");
     dilate_full(mesh.base,mesh.mr,written,T);
     return stats;
+}
+
+// ---------------------------------------------------------------------------
+// Tangent-space normal-map bake
+//
+// For every shaded texel: the texel's world point on the decimated mesh is
+// pushed to the closest point on the dense remeshed shell; the shell triangle's
+// normal is then expressed in the decimated mesh's tangent frame (N from the
+// area-weighted welded vertex normals the GLB writer also emits; T from the
+// Lengyel UV derivatives; B = cross(N, T) * w). glTF's normal maps are +Y up
+// in image space: with v running down the image, +Y is the direction of
+// decreasing v, so the frame is computed on v' = 1 - v.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+void dilate_rgba(std::vector<uint8_t>& img, std::vector<uint8_t> mask, int T) {
+    std::vector<int> queue;
+    queue.reserve((size_t)T * T / 4);
+    for (int y = 0; y < T; ++y) for (int x = 0; x < T; ++x)
+        if (mask[(size_t)y*T + x]) queue.push_back(y*T + x);
+    static const int DX[4] = {1, -1, 0, 0}, DY[4] = {0, 0, 1, -1};
+    for (size_t qi = 0; qi < queue.size(); ++qi) {
+        const int t = queue[qi], x = t % T, y = t / T;
+        for (int d = 0; d < 4; ++d) {
+            const int xx = x + DX[d], yy = y + DY[d];
+            if (xx < 0 || yy < 0 || xx >= T || yy >= T) continue;
+            const size_t s = (size_t)yy*T + xx;
+            if (mask[s]) continue;
+            for (int c = 0; c < 4; ++c) img[4*s+c] = img[4*(size_t)t+c];
+            mask[s] = 1;
+            queue.push_back((int)s);
+        }
+    }
+}
+
+inline void v_cross(const float a[3], const float b[3], float o[3]) {
+    o[0] = a[1]*b[2]-a[2]*b[1]; o[1] = a[2]*b[0]-a[0]*b[2]; o[2] = a[0]*b[1]-a[1]*b[0];
+}
+inline float v_dot(const float a[3], const float b[3]) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+inline bool v_normalize(float v[3]) {
+    const float l = std::sqrt(v_dot(v, v));
+    if (l <= 1e-20f) return false;
+    v[0] /= l; v[1] /= l; v[2] /= l; return true;
+}
+
+// Closest-point filter for the normal bake: only shell triangles facing roughly the
+// same way as the texel's own (low-poly) normal count. Without it a texel at a strap
+// or plate edge snaps to the nearer skin *behind* the strap and bakes a normal that is
+// perpendicular to its surface (a dark blotch); rejecting that candidate lets the
+// search continue to the strap's own surface. |dot| because the shell's global
+// orientation is not guaranteed (the bake flips into the right hemisphere later).
+struct FacingFilter {
+    const float* verts; const int32_t* faces; float n[3]; float min_dot;
+    static bool accept(void* ctx, int32_t f, const float[3]) {
+        const FacingFilter* c = (const FacingFilter*)ctx;
+        const int32_t* hf = &c->faces[3*(size_t)f];
+        const float* a = &c->verts[3*(size_t)hf[0]]; const float* b = &c->verts[3*(size_t)hf[1]]; const float* d = &c->verts[3*(size_t)hf[2]];
+        float e1[3], e2[3], fn[3];
+        for (int k = 0; k < 3; ++k) { e1[k] = b[k]-a[k]; e2[k] = d[k]-a[k]; }
+        v_cross(e1, e2, fn);
+        if (!v_normalize(fn)) return false;
+        return std::fabs(v_dot(fn, c->n)) >= c->min_dot;
+    }
+};
+constexpr float kFacingMinDot = 0.2588f;   // cos(75 deg)
+
+} // namespace
+
+std::vector<int32_t> rasterize_owner(const BakedMesh& bm) {
+    const int T = bm.T;
+    std::vector<int32_t> owner((size_t)T * T, -1);
+    const int Fo = (int)bm.faces.size() / 3;
+    for (int f = 0; f < Fo; ++f) {
+        const int idx[3] = { bm.faces[3*f], bm.faces[3*f+1], bm.faces[3*f+2] };
+        float px[3], py[3];
+        for (int j = 0; j < 3; ++j) { px[j] = bm.uv[2*idx[j]] * T; py[j] = bm.uv[2*idx[j]+1] * T; }
+        int x0 = (int)std::floor(std::min({px[0],px[1],px[2]})), x1 = (int)std::ceil(std::max({px[0],px[1],px[2]}));
+        int y0 = (int)std::floor(std::min({py[0],py[1],py[2]})), y1 = (int)std::ceil(std::max({py[0],py[1],py[2]}));
+        x0 = std::max(0,x0); y0 = std::max(0,y0); x1 = std::min(T-1,x1); y1 = std::min(T-1,y1);
+        const float d = (py[1]-py[2])*(px[0]-px[2]) + (px[2]-px[1])*(py[0]-py[2]);
+        if (std::fabs(d) < 1e-9f) continue;
+        for (int y = y0; y <= y1; ++y) for (int x = x0; x <= x1; ++x) {
+            const float fx = x + 0.5f, fy = y + 0.5f;
+            const float w0 = ((py[1]-py[2])*(fx-px[2]) + (px[2]-px[1])*(fy-py[2]))/d;
+            const float w1 = ((py[2]-py[0])*(fx-px[2]) + (px[0]-px[2])*(fy-py[2]))/d;
+            const float w2 = 1 - w0 - w1;
+            if (w0 < -0.001f || w1 < -0.001f || w2 < -0.001f) continue;
+            owner[(size_t)y*T + x] = f;
+        }
+    }
+    return owner;
+}
+
+void bake_normals(BakedMesh& bm, const std::vector<int32_t>& owner, const NormalSource& src) {
+    const int T = bm.T;
+    const int Vo = (int)bm.verts.size() / 3, Fo = (int)bm.faces.size() / 3;
+    if (!src.ok() || T <= 0 || Fo == 0 || owner.size() != (size_t)T * T) return;
+    const auto t0 = std::chrono::steady_clock::now();
+
+    // Per-vertex smooth normals, welded by exact position so chart seams agree: the
+    // GLB writer's routine, run on the same glTF-frame positions it will see (so even
+    // its zero-sum fallback matches), then rotated back to TRELLIS space.
+    std::vector<float> vn((size_t)Vo * 3);
+    {
+        std::vector<float> gpos((size_t)Vo * 3);
+        for (int i = 0; i < Vo; ++i) { gpos[3*i] = bm.verts[3*i]; gpos[3*i+1] = bm.verts[3*i+2]; gpos[3*i+2] = -bm.verts[3*i+1]; }
+        const std::vector<float> gn = welded_normals_gltf(gpos.data(), Vo, bm.faces.data(), Fo);
+        for (int i = 0; i < Vo; ++i) { vn[3*i] = gn[3*i]; vn[3*i+1] = -gn[3*i+2]; vn[3*i+2] = gn[3*i+1]; }
+    }
+
+    // Per-vertex tangent frame (Lengyel) on v' = 1 - v, see header comment.
+    std::vector<float> tan((size_t)Vo * 3, 0.f), bit((size_t)Vo * 3, 0.f);
+    for (int f = 0; f < Fo; ++f) {
+        const int i0 = bm.faces[3*f], i1 = bm.faces[3*f+1], i2 = bm.faces[3*f+2];
+        const float* p0 = &bm.verts[3*i0]; const float* p1 = &bm.verts[3*i1]; const float* p2 = &bm.verts[3*i2];
+        const float u0 = bm.uv[2*i0], v0 = 1.f - bm.uv[2*i0+1];
+        const float u1 = bm.uv[2*i1], v1 = 1.f - bm.uv[2*i1+1];
+        const float u2 = bm.uv[2*i2], v2 = 1.f - bm.uv[2*i2+1];
+        float e1[3], e2[3];
+        for (int k = 0; k < 3; ++k) { e1[k] = p1[k]-p0[k]; e2[k] = p2[k]-p0[k]; }
+        const float du1 = u1-u0, dv1 = v1-v0, du2 = u2-u0, dv2 = v2-v0;
+        const float det = du1*dv2 - du2*dv1;
+        if (std::fabs(det) < 1e-20f) continue;
+        const float r = 1.f / det;
+        float sdir[3], tdir[3];
+        for (int k = 0; k < 3; ++k) {
+            sdir[k] = (dv2*e1[k] - dv1*e2[k]) * r;
+            tdir[k] = (du1*e2[k] - du2*e1[k]) * r;
+        }
+        for (int j = 0; j < 3; ++j) {
+            const int i = bm.faces[3*f+j];
+            for (int k = 0; k < 3; ++k) { tan[3*i+k] += sdir[k]; bit[3*i+k] += tdir[k]; }
+        }
+    }
+    bm.tangents.assign((size_t)Vo * 4, 0.f);
+    std::vector<float> vb((size_t)Vo * 3);   // the bitangent the shader will reconstruct
+    for (int i = 0; i < Vo; ++i) {
+        const float* n = &vn[3*i];
+        float t[3] = { tan[3*i], tan[3*i+1], tan[3*i+2] };
+        const float nt = v_dot(n, t);
+        for (int k = 0; k < 3; ++k) t[k] -= n[k] * nt;
+        if (!v_normalize(t)) {
+            // degenerate UVs: any vector perpendicular to n
+            float a[3] = { std::fabs(n[0]) < 0.9f ? 1.f : 0.f, std::fabs(n[0]) < 0.9f ? 0.f : 1.f, 0.f };
+            v_cross(a, n, t); v_normalize(t);
+        }
+        float c[3]; v_cross(n, t, c);
+        const float w = v_dot(c, &bit[3*i]) < 0.f ? -1.f : 1.f;
+        bm.tangents[4*i+0] = t[0]; bm.tangents[4*i+1] = t[1]; bm.tangents[4*i+2] = t[2]; bm.tangents[4*i+3] = w;
+        for (int k = 0; k < 3; ++k) vb[3*i+k] = c[k] * w;
+    }
+
+    bm.nrm.assign((size_t)T * T * 4, 0);
+    for (size_t t = 0; t < (size_t)T * T; ++t) { bm.nrm[4*t] = 128; bm.nrm[4*t+1] = 128; bm.nrm[4*t+2] = 255; bm.nrm[4*t+3] = 255; }
+    std::vector<uint8_t> mask((size_t)T * T, 0);
+    const float max_dist = src.max_dist > 0.f ? src.max_dist : 1e30f;
+    std::atomic<long long> n_baked{0}, n_miss{0}, n_flip{0};
+
+    auto rows = [&](int y_begin, int y_end) {
+        long long baked = 0, miss = 0, flip = 0;
+        for (int y = y_begin; y < y_end; ++y) for (int x = 0; x < T; ++x) {
+            const size_t t = (size_t)y * T + x;
+            const int f = owner[t];
+            if (f < 0) continue;
+            const int idx[3] = { bm.faces[3*f], bm.faces[3*f+1], bm.faces[3*f+2] };
+            float px[3], py[3];
+            for (int j = 0; j < 3; ++j) { px[j] = bm.uv[2*idx[j]] * T; py[j] = bm.uv[2*idx[j]+1] * T; }
+            const float d = (py[1]-py[2])*(px[0]-px[2]) + (px[2]-px[1])*(py[0]-py[2]);
+            if (std::fabs(d) < 1e-9f) continue;
+            const float fx = x + 0.5f, fy = y + 0.5f;
+            float w0 = ((py[1]-py[2])*(fx-px[2]) + (px[2]-px[1])*(fy-py[2]))/d;
+            float w1 = ((py[2]-py[0])*(fx-px[2]) + (px[0]-px[2])*(fy-py[2]))/d;
+            w0 = std::min(1.f, std::max(0.f, w0)); w1 = std::min(1.f - w0, std::max(0.f, w1));
+            const float w2 = 1.f - w0 - w1;
+            float p[3], n[3], tg[3], b[3];
+            for (int k = 0; k < 3; ++k) {
+                p[k]  = w0*bm.verts[3*idx[0]+k]     + w1*bm.verts[3*idx[1]+k]     + w2*bm.verts[3*idx[2]+k];
+                n[k]  = w0*vn[3*idx[0]+k]           + w1*vn[3*idx[1]+k]           + w2*vn[3*idx[2]+k];
+                tg[k] = w0*bm.tangents[4*idx[0]+k]  + w1*bm.tangents[4*idx[1]+k]  + w2*bm.tangents[4*idx[2]+k];
+                b[k]  = w0*vb[3*idx[0]+k]           + w1*vb[3*idx[1]+k]           + w2*vb[3*idx[2]+k];
+            }
+            if (!v_normalize(n)) continue;
+            const float nt = v_dot(n, tg);
+            for (int k = 0; k < 3; ++k) tg[k] -= n[k] * nt;
+            if (!v_normalize(tg)) continue;
+            const float nb = v_dot(n, b);
+            for (int k = 0; k < 3; ++k) b[k] -= n[k] * nb;
+            if (!v_normalize(b)) continue;
+
+            FacingFilter flt{src.verts, src.faces, {n[0], n[1], n[2]}, kFacingMinDot};
+            const TriBvh::Hit h = src.bvh->closest_filtered(p, &FacingFilter::accept, &flt, max_dist);
+            float hn[3] = { n[0], n[1], n[2] };
+            if (h.face >= 0) {
+                const int32_t* hf = &src.faces[3*(size_t)h.face];
+                const float* a = &src.verts[3*(size_t)hf[0]];
+                const float* bb = &src.verts[3*(size_t)hf[1]];
+                const float* c = &src.verts[3*(size_t)hf[2]];
+                float e1[3], e2[3];
+                for (int k = 0; k < 3; ++k) { e1[k] = bb[k]-a[k]; e2[k] = c[k]-a[k]; }
+                v_cross(e1, e2, hn);
+                if (!v_normalize(hn)) { hn[0] = n[0]; hn[1] = n[1]; hn[2] = n[2]; }
+                // The shell's winding is unified but its global orientation is not
+                // guaranteed; the decimated mesh's own normal decides the hemisphere.
+                if (v_dot(hn, n) < 0.f) { hn[0] = -hn[0]; hn[1] = -hn[1]; hn[2] = -hn[2]; ++flip; }
+            } else ++miss;
+            float ts[3] = { v_dot(hn, tg), v_dot(hn, b), v_dot(hn, n) };
+            v_normalize(ts);
+            for (int k = 0; k < 3; ++k) {
+                const float v = (ts[k] * 0.5f + 0.5f) * 255.f;
+                bm.nrm[4*t+k] = (uint8_t)(v < 0.f ? 0 : (v > 255.f ? 255 : v + 0.5f));
+            }
+            bm.nrm[4*t+3] = 255;
+            mask[t] = 1;
+            ++baked;
+        }
+        n_baked += baked; n_miss += miss; n_flip += flip;
+    };
+    const int nthreads = std::max(1u, std::min(std::thread::hardware_concurrency(), 64u));
+    std::vector<std::thread> pool;
+    const int chunk = (T + nthreads - 1) / nthreads;
+    for (int i = 0; i < nthreads; ++i) {
+        const int y0 = i * chunk, y1 = std::min(T, y0 + chunk);
+        if (y0 >= y1) break;
+        pool.emplace_back(rows, y0, y1);
+    }
+    for (auto& th : pool) th.join();
+
+    dilate_rgba(bm.nrm, mask, T);
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    printf("  normal bake: %lld texels (%lld no facing shell hit within radius -> flat, %lld hemisphere flips) in %.1fs\n",
+           (long long)n_baked, (long long)n_miss, (long long)n_flip, secs);
+    fflush(stdout);
 }
 
 } // namespace trellis

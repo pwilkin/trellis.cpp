@@ -1,5 +1,6 @@
 #include "mesh_glb.h"
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <cfloat>
@@ -54,6 +55,14 @@ static void png_collect(void* ctx, void* data, int size) {
 static void w_u32(std::vector<uint8_t>& o, uint32_t v) {
     o.push_back(v & 0xff); o.push_back((v >> 8) & 0xff);
     o.push_back((v >> 16) & 0xff); o.push_back((v >> 24) & 0xff);
+}
+
+static void appendf(std::string& s, const char* fmt, ...) {
+    char buf[2048];
+    va_list ap; va_start(ap, fmt);
+    const int n = std::vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n > 0) s.append(buf, (size_t)std::min(n, (int)sizeof(buf) - 1));
 }
 
 static std::string generated_timestamp_utc() {
@@ -317,7 +326,8 @@ std::vector<float> welded_normals_gltf(const float* pos, int64_t V,
 bool write_glb_textured(const char* path, const float* verts, int64_t V, const float* uv,
                         const int32_t* faces, int64_t F,
                         const unsigned char* base_rgba, const unsigned char* mr_rgba, int T,
-                        bool double_sided, int64_t seed, const char* copyright, bool use_webp) {
+                        bool double_sided, int64_t seed, const char* copyright, bool use_webp,
+                        const unsigned char* nrm_rgba, const float* tangents) {
     // rotate positions (x,z,-y) + min/max
     std::vector<float> pos((size_t)V*3);
     float mn[3]={FLT_MAX,FLT_MAX,FLT_MAX}, mx[3]={-FLT_MAX,-FLT_MAX,-FLT_MAX};
@@ -349,54 +359,82 @@ bool write_glb_textured(const char* path, const float* verts, int64_t V, const f
     }
 
     auto pad4=[](std::vector<uint8_t>&b){ while(b.size()%4) b.push_back(0); };
-    const uint32_t posB=(uint32_t)(V*12), nrmB=(uint32_t)(V*12), uvB=(uint32_t)(V*8), idxB=(uint32_t)(F*12);
-    std::vector<uint8_t> bin(posB+nrmB+uvB+idxB);
+    // Optional tangent-space normal map: a third image plus a TANGENT accessor so
+    // viewers use the exact frame the bake used. Always PNG — lossy WebP on a normal
+    // map shows up as shading noise — which is valid alongside EXT_texture_webp.
+    const bool has_nrm = nrm_rgba != nullptr && tangents != nullptr;
+    std::vector<uint8_t> pngN;
+    if (has_nrm) stbi_write_png_to_func(png_collect, &pngN, T, T, 4, nrm_rgba, T*4);
+    const uint32_t posB=(uint32_t)(V*12), nrmB=(uint32_t)(V*12), uvB=(uint32_t)(V*8),
+                   tanB=has_nrm ? (uint32_t)(V*16) : 0u, idxB=(uint32_t)(F*12);
+    std::vector<uint8_t> bin(posB+nrmB+uvB+tanB+idxB);
     std::memcpy(bin.data(), pos.data(), posB);
     std::memcpy(bin.data()+posB, nrm.data(), nrmB);
     std::memcpy(bin.data()+posB+nrmB, uv, uvB);
-    for (int64_t i=0;i<F*3;++i){ uint32_t v=(uint32_t)faces[i]; std::memcpy(bin.data()+posB+nrmB+uvB+i*4,&v,4); }
-    pad4(bin); const uint32_t off4=(uint32_t)bin.size();
-    bin.insert(bin.end(), pngB.begin(), pngB.end()); pad4(bin); const uint32_t off5=(uint32_t)bin.size();
-    bin.insert(bin.end(), pngM.begin(), pngM.end()); pad4(bin);
+    if (has_nrm) {   // same TRELLIS->glTF rotation as the positions; w unchanged
+        float* tan = (float*)(bin.data()+posB+nrmB+uvB);
+        for (int64_t i=0;i<V;++i){ tan[4*i]=tangents[4*i]; tan[4*i+1]=tangents[4*i+2]; tan[4*i+2]=-tangents[4*i+1]; tan[4*i+3]=tangents[4*i+3]; }
+    }
+    const uint32_t idxOff = posB+nrmB+uvB+tanB;
+    for (int64_t i=0;i<F*3;++i){ uint32_t v=(uint32_t)faces[i]; std::memcpy(bin.data()+idxOff+i*4,&v,4); }
+    pad4(bin); const uint32_t offB=(uint32_t)bin.size();
+    bin.insert(bin.end(), pngB.begin(), pngB.end()); pad4(bin); const uint32_t offM=(uint32_t)bin.size();
+    bin.insert(bin.end(), pngM.begin(), pngM.end()); pad4(bin); const uint32_t offN=(uint32_t)bin.size();
+    if (has_nrm) { bin.insert(bin.end(), pngN.begin(), pngN.end()); pad4(bin); }
 
     const std::string asset_meta = asset_extras_json(seed);
     const std::string generator = generator_label();
     const std::string asset_copyright = asset_copyright_json(copyright);
 
-    char buf[4096];
-    std::snprintf(buf,sizeof(buf),
+    // bufferViews: 0 POSITION, 1 NORMAL, 2 TEXCOORD_0, [3 TANGENT], then indices, then images.
+    const int bvIdx = has_nrm ? 4 : 3, bvImg = bvIdx + 1;
+    const char* mime = webp ? "image/webp" : "image/png";
+    std::string json;
+    json.reserve(8192);
+    appendf(json,
         "{\"asset\":{\"version\":\"2.0\",\"minVersion\":\"2.0\",\"generator\":\"%s\"%s%s},"
         "%s"
-        "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}],"
-        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"TEXCOORD_0\":2},\"indices\":3,\"material\":0,\"mode\":4}]}],"
-        "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0},\"metallicRoughnessTexture\":{\"index\":1},\"metallicFactor\":1.0,\"roughnessFactor\":1.0},\"alphaMode\":\"OPAQUE\",\"doubleSided\":%s}],"
-        "%s"
-        "\"images\":[{\"bufferView\":4,\"mimeType\":\"%s\"},{\"bufferView\":5,\"mimeType\":\"%s\"}],"
-        "\"samplers\":[{}],"
+        "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}],",
+        generator.c_str(), asset_copyright.c_str(), asset_meta.c_str(),
+        webp ? "\"extensionsUsed\":[\"EXT_texture_webp\"],\"extensionsRequired\":[\"EXT_texture_webp\"]," : "");
+    appendf(json,
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"TEXCOORD_0\":2%s},\"indices\":%d,\"material\":0,\"mode\":4}]}],"
+        "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0},\"metallicRoughnessTexture\":{\"index\":1},\"metallicFactor\":1.0,\"roughnessFactor\":1.0},%s\"alphaMode\":\"OPAQUE\",\"doubleSided\":%s}],",
+        has_nrm ? ",\"TANGENT\":3" : "", bvIdx,
+        has_nrm ? "\"normalTexture\":{\"index\":2}," : "",
+        double_sided ? "true" : "false");
+    if (webp)
+        json += "\"textures\":[{\"sampler\":0,\"extensions\":{\"EXT_texture_webp\":{\"source\":0}}},{\"sampler\":0,\"extensions\":{\"EXT_texture_webp\":{\"source\":1}}}";
+    else
+        json += "\"textures\":[{\"source\":0,\"sampler\":0},{\"source\":1,\"sampler\":0}";
+    if (has_nrm) json += ",{\"source\":2,\"sampler\":0}";
+    json += "],";
+    appendf(json, "\"images\":[{\"bufferView\":%d,\"mimeType\":\"%s\"},{\"bufferView\":%d,\"mimeType\":\"%s\"}",
+            bvImg, mime, bvImg+1, mime);
+    if (has_nrm) appendf(json, ",{\"bufferView\":%d,\"mimeType\":\"image/png\"}", bvImg+2);
+    json += "],\"samplers\":[{}],";
+    appendf(json,
         "\"accessors\":["
         "{\"bufferView\":0,\"componentType\":5126,\"count\":%lld,\"type\":\"VEC3\",\"min\":[%.9g,%.9g,%.9g],\"max\":[%.9g,%.9g,%.9g]},"
         "{\"bufferView\":1,\"componentType\":5126,\"count\":%lld,\"type\":\"VEC3\"},"
-        "{\"bufferView\":2,\"componentType\":5126,\"count\":%lld,\"type\":\"VEC2\"},"
-        "{\"bufferView\":3,\"componentType\":5125,\"count\":%lld,\"type\":\"SCALAR\"}],"
+        "{\"bufferView\":2,\"componentType\":5126,\"count\":%lld,\"type\":\"VEC2\"},",
+        (long long)V, mn[0],mn[1],mn[2],mx[0],mx[1],mx[2], (long long)V, (long long)V);
+    if (has_nrm) appendf(json, "{\"bufferView\":3,\"componentType\":5126,\"count\":%lld,\"type\":\"VEC4\"},", (long long)V);
+    appendf(json, "{\"bufferView\":%d,\"componentType\":5125,\"count\":%lld,\"type\":\"SCALAR\"}],", bvIdx, (long long)(F*3));
+    appendf(json,
         "\"bufferViews\":["
         "{\"buffer\":0,\"byteOffset\":0,\"byteLength\":%u,\"target\":34962},"
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34962},"
-        "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34962},"
+        "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34962},",
+        posB, posB,nrmB, posB+nrmB,uvB);
+    if (has_nrm) appendf(json, "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34962},", posB+nrmB+uvB, tanB);
+    appendf(json,
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34963},"
         "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u},"
-        "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u}],"
-        "\"buffers\":[{\"byteLength\":%u}]}",
-        generator.c_str(), asset_copyright.c_str(), asset_meta.c_str(),
-        webp ? "\"extensionsUsed\":[\"EXT_texture_webp\"],\"extensionsRequired\":[\"EXT_texture_webp\"]," : "",
-        double_sided ? "true" : "false",
-        webp ? "\"textures\":[{\"sampler\":0,\"extensions\":{\"EXT_texture_webp\":{\"source\":0}}},{\"sampler\":0,\"extensions\":{\"EXT_texture_webp\":{\"source\":1}}}],"
-             : "\"textures\":[{\"source\":0,\"sampler\":0},{\"source\":1,\"sampler\":0}],",
-        webp ? "image/webp" : "image/png", webp ? "image/webp" : "image/png",
-        (long long)V, mn[0],mn[1],mn[2],mx[0],mx[1],mx[2],
-        (long long)V, (long long)V, (long long)(F*3),
-        posB, posB,nrmB, posB+nrmB,uvB, posB+nrmB+uvB,idxB,
-        off4,(uint32_t)pngB.size(), off5,(uint32_t)pngM.size(), (uint32_t)bin.size());
-    std::string json(buf);
+        "{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u}",
+        idxOff,idxB, offB,(uint32_t)pngB.size(), offM,(uint32_t)pngM.size());
+    if (has_nrm) appendf(json, ",{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u}", offN,(uint32_t)pngN.size());
+    appendf(json, "],\"buffers\":[{\"byteLength\":%u}]}", (uint32_t)bin.size());
     while (json.size()%4) json.push_back(' ');
 
     uint32_t total = 12 + 8 + (uint32_t)json.size() + 8 + (uint32_t)bin.size();
