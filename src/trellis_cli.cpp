@@ -50,6 +50,19 @@ static bool backend_is_htp(const std::string& backend) {
            std::tolower((unsigned char)backend[2]) == 'p';
 }
 // [dbg] overall stats of a flat tensor — used to compare LR vs HR shape-SLAT in decode space.
+// Pixal3D's projection grid is y-up with the camera on +z (pixal3d_project_cell: image up =
+// grid y). TRELLIS.2's is z-up with the front on -y, which is what the writers' (x,y,z)->(x,z,-y)
+// glTF rotation assumes. Without this, Pixal3D models are written lying on their backs. The
+// rotation is applied only to the final vertex arrays, after every stage that samples the voxel
+// grid (remesh, PBR bake) has run in grid coordinates. det = +1, so winding is unchanged.
+static void pixal3d_to_trellis_frame(vector<float>& v) {
+    for (size_t i = 0; i + 2 < v.size(); i += 3) {
+        const float y = v[i + 1], z = v[i + 2];
+        v[i + 1] = -z;
+        v[i + 2] = y;
+    }
+}
+
 static void slat_stats(const char* tag, const vector<float>& v) {
     if (v.empty()) { printf("      [stats] %s EMPTY\n", tag); return; }
     double s = 0, s2 = 0; float mn = 0, mx = 0; bool first = true; size_t bad = 0;
@@ -968,6 +981,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
                                       : trellis::uv_bake(dv, dV, df, dF, no_vp, T, &vox);
         if (!boxuv && !bm.ok()) bm = trellis::uv_chart_project(dv, dV, df, dF, no_vp, T, &vox);
         if (bm.ok()) {
+            if (pix) pixal3d_to_trellis_frame(bm.verts);
             trellis::write_glb_textured(outglb.c_str(), bm.verts.data(), (int64_t)bm.verts.size()/3, bm.uv.data(),
                                         bm.faces.data(), (int64_t)bm.faces.size()/3, bm.base.data(), bm.mr.data(), bm.T,
                                         /*double_sided=*/rm.F() == 0, run_seed,
@@ -983,6 +997,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         fprintf(stderr,"[trellis] textured POST unavailable for retopo\n");
         return 1;
     }
+    if (pix) pixal3d_to_trellis_frame(mesh.verts);   // untextured GLB and the .ply
     if (!textured)
         trellis::write_glb(outglb.c_str(), mesh.verts.data(), mesh.V(), mesh.faces.data(), mesh.F(),
                            colors.empty() ? nullptr : colors.data(), run_seed,
