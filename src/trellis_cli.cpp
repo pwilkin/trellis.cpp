@@ -5,6 +5,7 @@
 #include "trellis_debug.h"
 #include "trellis_sched.h"
 #include "preprocess.h"
+#include "birefnet.h"   // BirefnetAllocError: the GPU->CPU->threshold fallback keys on it
 #include "dinov3.h"
 #include "pixal3d.h"
 #include "flow_runner.h"
@@ -20,6 +21,7 @@
 #include "trellis_run.h"
 #include "retopo_process.h"
 #include "ggml.h"   // proj_in_channels is read straight off the checkpoint's proj_linear weight
+#include "ggml-cpu.h"   // ggml_backend_is_cpu: the BiRefNet retry only makes sense off the CPU
 
 #include <cstdio>
 #include <cstdlib>
@@ -240,14 +242,43 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         // once, normalized for 512 and 1024.
         // BiRefNet's small convolutions are slower and currently nondeterministic on HTP.
         // Keep other explicitly selected backends on their existing path.
-        const std::string bg_saved_backend = trellis::g_backend;
+        //
+        // The matte needs ~0.45 GB of weights plus a ~0.9 GB compute buffer for the stage-0
+        // window-attention graph (TRELLIS_DBG_ALLOC=1 prints every graph). On GPUs that cannot
+        // spare that (issue #24: "birefnet alloc") the run used to die right here, even though
+        // the flow stages that follow would have fit. So: GPU, then the same model on the CPU
+        // backend (same output, slower), and in auto mode the threshold matte as a last resort.
+        bool matte_on_cpu = false;   // where the last attempt actually ran (a CPU-only build has no GPU to fall back from)
+        auto run_matte = [&](bool on_cpu) {
+            const std::string bg_saved_backend = trellis::g_backend;
+            if (on_cpu) trellis::g_backend = "CPU";
+            trellis::Model bm = trellis::Model::load(M + "/birefnet.gguf", on_cpu ? -1 : gpu);
+            trellis::g_backend = bg_saved_backend;
+            matte_on_cpu = ggml_backend_is_cpu(bm.backend);
+            try {
+                cutout = trellis::birefnet_cutout(img, bm, gpu < 0 ? 0 : gpu, cut_sz);
+            } catch (...) {
+                bm.free();   // Model has no destructor: a throw here used to leak the weights
+                throw;       // on the device, and every retry started with less memory.
+            }
+            bm.free();
+        };
         const bool bg_on_cpu = backend_is_htp(requested_backend);
-        if (bg_on_cpu) trellis::g_backend = "CPU";
-        trellis::Model bm = trellis::Model::load(M + "/birefnet.gguf",
-                                                 bg_on_cpu ? -1 : gpu);
-        trellis::g_backend = bg_saved_backend;
-        cutout = trellis::birefnet_cutout(img, bm, gpu < 0 ? 0 : gpu, cut_sz);
-        bm.free();
+        try {
+            run_matte(bg_on_cpu);
+        } catch (const trellis::BirefnetAllocError& e) {
+            printf("      %s\n", e.what());
+            if (!matte_on_cpu) {
+                printf("      -> retrying BiRefNet on the CPU backend (same matte, slower)\n"); fflush(stdout);
+                try { run_matte(true); }
+                catch (const std::exception& e2) { printf("      %s\n", e2.what()); }
+            }
+            if (cutout.empty()) {
+                if (cfg.birefnet == 1) throw;   // explicit --bg-removal birefnet: report, don't substitute
+                printf("      -> falling back to the threshold matte; bright highlights may punch holes\n"); fflush(stdout);
+                cutout = trellis::threshold_cutout(img, cut_sz);
+            }
+        }
         if (cutout.empty()) return 1;
         chw = trellis::normalize_cutout(cutout, cut_sz, 512);
         if (cascade) chw1024 = trellis::normalize_cutout(cutout, cut_sz, 1024);

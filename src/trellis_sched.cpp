@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace trellis {
@@ -121,19 +122,61 @@ GraphExec::~GraphExec() {
     // sched_ is owned by the Model, not by us.
 }
 
+// Exact compute-buffer size the graph would need on `buft`, measured without allocating
+// (ggml_gallocr_reserve_n_size). After a failed reserve there is no buffer left to ask.
+static size_t graph_buffer_bytes(ggml_backend_buffer_type_t buft, ggml_cgraph* graph) {
+    ggml_gallocr_t g = ggml_gallocr_new(buft);
+    size_t size = 0;
+    ggml_gallocr_reserve_n_size(g, graph, nullptr, nullptr, &size);
+    ggml_gallocr_free(g);
+    return size;
+}
+
+std::string describe_alloc_failure(ggml_backend_t backend, ggml_cgraph* graph) {
+    char buf[256];
+    const char* name = backend ? ggml_backend_name(backend) : "?";
+    const double mib = 1024.0 * 1024.0;
+    const double need = backend ? graph_buffer_bytes(ggml_backend_get_default_buffer_type(backend), graph) / mib : 0.0;
+    size_t free_b = 0, total_b = 0;
+    if (ggml_backend_dev_t dev = backend ? ggml_backend_get_device(backend) : nullptr)
+        ggml_backend_dev_memory(dev, &free_b, &total_b);
+    if (total_b)
+        snprintf(buf, sizeof buf, "out of memory on %s: a %d-node graph needs a %.0f MiB buffer, device has %.0f MiB free of %.0f MiB",
+                 name, ggml_graph_n_nodes(graph), need, free_b / mib, total_b / mib);
+    else
+        snprintf(buf, sizeof buf, "out of memory on %s: a %d-node graph needs a %.0f MiB buffer",
+                 name, ggml_graph_n_nodes(graph), need);
+    return buf;
+}
+
 bool GraphExec::alloc(ggml_cgraph* graph) {
     if (sched_) {
         // Clears the previous graph's assignment; without it the scheduler keeps the old
         // allocation and the freshly uploaded inputs would land in stale buffers.
         ggml_backend_sched_reset(sched_);
         if (!ggml_backend_sched_alloc_graph(sched_, graph)) {
-            fprintf(stderr, "[trellis] scheduler failed to allocate graph\n");
+            fprintf(stderr, "[trellis] scheduler failed to allocate graph (%s)\n",
+                    describe_alloc_failure(backend_, graph).c_str());
             return false;
         }
         return true;
     }
     if (!galloc_) galloc_ = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend_));
-    return ggml_gallocr_alloc_graph(galloc_, graph);
+    if (!ggml_gallocr_alloc_graph(galloc_, graph)) {
+        fprintf(stderr, "[trellis] graph allocation failed (%s)\n",
+                describe_alloc_failure(backend_, graph).c_str());
+        return false;
+    }
+    // TRELLIS_DBG_ALLOC=1: per-graph compute buffer sizes (the diagnostic that used to live
+    // in birefnet.cpp's run_graph before the GraphExec refactor). Cheap, so always available.
+    static const bool dbg = std::getenv("TRELLIS_DBG_ALLOC") != nullptr;
+    if (dbg) {
+        ggml_tensor* out = ggml_graph_n_nodes(graph) ? ggml_graph_node(graph, ggml_graph_n_nodes(graph) - 1) : nullptr;
+        fprintf(stderr, "      [alloc] %-40s nodes=%-4d buffer=%7.1f MiB  %s\n",
+                out ? ggml_get_name(out) : "", ggml_graph_n_nodes(graph),
+                buffer_size() / (1024.0 * 1024.0), ggml_backend_name(backend_));
+    }
+    return true;
 }
 
 ggml_status GraphExec::compute(ggml_cgraph* graph, const char* label) {

@@ -4,6 +4,8 @@
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 
+#include <string>
+
 namespace trellis {
 
 struct Model;
@@ -30,6 +32,11 @@ void set_sched_mode(int mode);
 void set_vulkan_fallback_mode(int mode);
 
 bool sched_enabled_for(ggml_backend_t primary);
+
+// One line for an error message when a graph could not be allocated: backend name, node
+// count, the compute buffer the graph needs (measured, not allocated) and the device's
+// free/total memory.
+std::string describe_alloc_failure(ggml_backend_t backend, ggml_cgraph* graph);
 
 // Fallback backends shared process-wide. Created on demand, never freed; they outlive the
 // per-stage Models that borrow them.
