@@ -36,7 +36,9 @@ static std::vector<std::vector<float>> run_graph(const Model& m, ggml_context* c
     ggml_cgraph* g = ggml_new_graph_custom(c, nodes, false);
     for (T* o : outs) { ggml_set_output(o); ggml_build_forward_expand(g, o); }
     trellis::GraphExec ex(m);
-    if (!ex.alloc(g)) throw std::runtime_error("birefnet alloc");
+    // The alloc failure is what a user on a small GPU actually sees ("birefnet alloc" in the
+    // Studio toast, issue #24), so say where and how much: the message is the diagnosis.
+    if (!ex.alloc(g)) throw BirefnetAllocError("birefnet: " + describe_alloc_failure(m.backend, g));
     for (auto& [t, d] : ins) ggml_backend_tensor_set(t, d, 0, ggml_nbytes(t));
     if (ex.compute(g, "birefnet") != GGML_STATUS_SUCCESS) throw std::runtime_error("birefnet compute");
     std::vector<std::vector<float>> r;
@@ -157,6 +159,7 @@ static std::vector<float> swin_block_run(const Model& m, const std::string& p,
     h2 = ggml_gelu_erf(c, h2);
     h2 = lin(c, m, p + ".mlp.fc2", h2);
     T* outp = ggml_add(c, xr, h2);
+    ggml_set_name(outp, p.c_str());                                 // labels the TRELLIS_DBG_ALLOC row
     std::vector<float> r = run_graph(m, c, {outp},
         { {x, xpad.data()}, {xb, xin.data()}, {cmask, cmaskd.data()}, {gi, wi.gather.data()},
           {si, wi.scatter.data()}, {sm, smask_host.data()} })[0];

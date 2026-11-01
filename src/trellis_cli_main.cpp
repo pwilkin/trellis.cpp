@@ -2,6 +2,7 @@
 #include "trellis_args.h"
 #include "trellis_run.h"
 #include <cstdio>
+#include <exception>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -36,5 +37,12 @@ int main(int argc, char** argv) {
     }
 
     KeepAwake _awake;
-    return trellis_run(p);
+    // trellis-server already reports these to the client; the CLI used to abort() through an
+    // uncaught throw, which turns an "out of memory on Vulkan0 ..." message into a core dump.
+    try {
+        return trellis_run(p);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[trellis] failed: %s\n", e.what());
+        return 1;
+    }
 }
