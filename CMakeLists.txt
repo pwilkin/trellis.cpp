@@ -429,6 +429,9 @@ set_target_properties(trellis-test-uv-preset PROPERTIES BUILD_RPATH "${GGML_RPAT
 add_executable(trellis-test-uv-overlap-cover src/test_uv_overlap_cover.cpp)
 target_link_libraries(trellis-test-uv-overlap-cover PRIVATE trellis_core)
 
+add_executable(trellis-test-uv-normal src/test_uv_normal.cpp)
+target_link_libraries(trellis-test-uv-normal PRIVATE trellis_core)
+
 add_executable(trellis-test-dinov3 src/test_dinov3.cpp)
 target_link_libraries(trellis-test-dinov3 PRIVATE trellis_core)
 set_target_properties(trellis-test-dinov3 PROPERTIES BUILD_RPATH "${GGML_RPATH}")

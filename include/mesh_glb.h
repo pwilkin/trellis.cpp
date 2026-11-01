@@ -22,11 +22,16 @@ bool write_glb(const char* path, const float* verts, int64_t V, const int32_t* f
 // double_sided=false matches the reference's remeshed output (consistent orientation);
 // pass true for un-remeshed fallback paths where winding is not guaranteed.
 // use_webp=false forces PNG textures even in a WebP-enabled build (--webp off).
+// nrm_rgba + tangents (both or neither): a [T*T*4] tangent-space normal map (always PNG)
+// and [V*4] glTF tangents (xyz + w) in TRELLIS space, from uv_bake's NormalSource bake;
+// adds a TANGENT accessor, a third image and material.normalTexture. Without them the
+// file layout is unchanged.
 bool write_glb_textured(const char* path, const float* verts, int64_t V, const float* uv,
                         const int32_t* faces, int64_t F,
                         const unsigned char* base_rgba, const unsigned char* mr_rgba, int T,
                         bool double_sided = false, int64_t seed = -1, const char* copyright = nullptr,
-                        bool use_webp = true);
+                        bool use_webp = true,
+                        const unsigned char* nrm_rgba = nullptr, const float* tangents = nullptr);
 
 // Debug helper: binary little-endian PLY in raw TRELLIS space (no axis swap).
 // colors: optional [V*3] float RGB in [0,1] -> written as uchar red/green/blue per vertex.
