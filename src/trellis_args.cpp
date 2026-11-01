@@ -48,6 +48,20 @@ bool parse_faces_arg(const char* value, TrellisParams& p, std::string& error) {
     return true;
 }
 
+bool parse_atlas_arg(const char* value, TrellisParams& p, std::string& error) {
+    if (std::string(value) == "auto") { p.tex = -1; return true; }
+    char* end = nullptr;
+    errno = 0;
+    const long n = std::strtol(value, &end, 10);
+    if (end == value || *end || errno == ERANGE || n < kAtlasMin || n > kAtlasMax) {
+        error = "atlas must be an integer from " + std::to_string(kAtlasMin) + " to " +
+                std::to_string(kAtlasMax) + " (or auto)";
+        return false;
+    }
+    p.tex = (int)n;
+    return true;
+}
+
 bool check_faces_compat(const TrellisParams& p, std::string& error) {
     if (p.faces > 0 && p.decim >= 0) {
         error = "faces sets the QEM decimation target and cannot be combined with --decim";
@@ -134,7 +148,7 @@ void print_usage(const char* argv0, bool server) {
         "                          UV unwrap; e.g. 50000 for a game prop\n"
         "      --decim GRID        legacy cluster-grid decimation instead of QEM\n"
         "                          (0 = keep the full-res mesh); not combinable with --faces\n"
-        "      --atlas PX          UV atlas size (default 2048 @1024 / 1024 @512)\n"
+        "      --atlas PX          UV atlas size, 256..8192 (default 2048 @1024 / 1024 @512)\n"
         "      --tex-res N         texture PBR resolution 512/1024 (default: auto — drops\n"
         "                          a dense res-1024 decode to a clean res-512 PBR volume)\n"
         "      --webp on|off       encode GLB textures as WebP (default: on when built with\n"
@@ -233,7 +247,9 @@ bool parse_args(int argc, char** argv, TrellisParams& p) {
         else if (a == "--faces")                { const char* v = need(a.c_str()); if (!v) return false;
                                                   std::string error;
                                                   if (!parse_faces_arg(v, p, error)) { fprintf(stderr, "[trellis] %s\n", error.c_str()); return false; } }
-        else if (a == "--atlas" || a == "--tex"){ const char* v = need(a.c_str()); if (!v) return false; p.tex = atoi(v); }
+        else if (a == "--atlas" || a == "--tex"){ const char* v = need(a.c_str()); if (!v) return false;
+                                                  std::string error;
+                                                  if (!parse_atlas_arg(v, p, error)) { fprintf(stderr, "[trellis] %s\n", error.c_str()); return false; } }
         else if (a == "--tex-res")              { const char* v = need(a.c_str()); if (!v) return false; p.tex_res = atoi(v); }
         else if (a == "--webp")                 { const char* v = need(a.c_str()); if (!v) return false;
                                                   p.webp = (std::strcmp(v,"off")==0 || std::strcmp(v,"0")==0 || std::strcmp(v,"false")==0) ? 0
