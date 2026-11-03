@@ -13,11 +13,21 @@ don't need this directory unless you're developing the app.
 ```
 src/            web UI (Vite + TypeScript, framework-free)
   api.ts        POST /generate, GET /health against trellis-server
-  viewer.ts     <model-viewer> wrapper (vendored in public/vendor)
+  viewer.ts     <model-viewer> wrapper (vendored in public/vendor): clay mode, turnaround sheets
   store.ts      IndexedDB gallery (input + GLB + thumbnail blobs)
+  queue.ts      in-memory generation queue + its editable "Up next" cards (server runs one job at a time)
+  sortable.ts   drag-to-reorder for the queue cards (pointer events, no library)
+  stages.ts     running-job stage + percent from the server log; learns this machine's timings
+  prefs.ts      UI preferences in localStorage (kept out of the installer's config.json)
+  options.ts    every generation option: values, labels, output presets, chips
+  controls.ts   settings editor: segmented controls, preset grid, seed + dice
+  glb.ts        reads a GLB's face count + embedded textures (caption, server check, handoff)
+  handoff.ts    assembles the modeler handoff package (files + notes.txt)
   config.ts     resolves server host/port/models (Tauri command or localStorage)
   settings.ts   models dir / gpu / port panel
-  main.ts       wires the generate flow, gallery, status polling
+  main.ts       wires the generate flow, queue hand-off, viewer chrome, gallery, status
+  ui.css        design tokens + components (design handoff "Queue, Output Presets & Viewer")
+public/fonts/   Geist + Geist Mono (SIL OFL, see OFL.txt), bundled for offline use
 src-tauri/      Rust shell
   src/server.rs spawns & supervises trellis-server, forwards stdout as
                 `server-log` events, kills it on exit

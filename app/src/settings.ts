@@ -1,8 +1,12 @@
 // Settings modal: shows the resolved config and lets the user adjust the bits
 // that make sense per environment. In Tauri, saving hands the config to the shell
 // (which restarts the server); in the browser we only expose host/port.
+//
+// The "Queue" section is different: those are UI preferences (prefs.ts), not
+// server config, so they save the moment they change and need no restart.
 
 import { loadConfig, saveConfig } from "./config";
+import { getPrefs, setPref } from "./prefs";
 import { invoke, isTauri, logsDir, openLogsDir, openOutputDir, pickDirectory } from "./tauri";
 
 function field(label: string, id: string, value: string, type = "text"): string {
@@ -22,6 +26,30 @@ function dirField(label: string, id: string, value: string): string {
 
 function ro(label: string, value: string): string {
   return `<div class="kv">${label}: <b>${value || "—"}</b></div>`;
+}
+
+/** Checkbox row with a one-line hint underneath. */
+function check(label: string, id: string, checked: boolean, hint: string): string {
+  return `<label class="check">
+    <input id="${id}" type="checkbox" ${checked ? "checked" : ""} />
+    <span>${label}<small class="muted">${hint}</small></span></label>`;
+}
+
+/** The Queue section: UI preferences, shown in both Tauri and browser mode. */
+function queuePrefsSection(): string {
+  return `<div class="section-head">Queue</div>
+    ${check(
+      "Queued images use the same settings as the generation in progress",
+      "pref-queue-same",
+      getPrefs().queueSameSettings,
+      "Off: each image dropped mid-run uses the settings panel as it is when you drop it.",
+    )}`;
+}
+
+/** Wire the Queue section's controls. Changes are saved immediately. */
+function bindQueuePrefs(body: HTMLElement): void {
+  const box = body.querySelector("#pref-queue-same") as HTMLInputElement;
+  box.addEventListener("change", () => setPref("queueSameSettings", box.checked));
 }
 
 export async function renderSettings(
@@ -55,10 +83,13 @@ export async function renderSettings(
           <input id="set-logs" type="text" value="${logDir.replace(/"/g, "&quot;")}" readonly />
           <button id="set-logs-open" class="tool-btn" type="button">Open</button>
         </div></label>
+      ${queuePrefsSection()}
       <div class="modal-actions">
         <button id="set-restart" class="tool-btn">Restart server</button>
         <button id="set-save" class="primary">Save &amp; restart</button>
       </div>`;
+
+    bindQueuePrefs(body);
 
     (body.querySelector("#set-logs-open") as HTMLButtonElement).onclick = async () => {
       try {
@@ -119,9 +150,11 @@ export async function renderSettings(
       <div class="kv">Running in a browser — connecting to a trellis-server you launched.</div>
       ${field("Host", "set-host", cfg.host)}
       ${field("Port", "set-port", String(cfg.port), "number")}
+      ${queuePrefsSection()}
       <div class="modal-actions">
         <button id="set-save" class="primary">Save</button>
       </div>`;
+    bindQueuePrefs(body);
     (body.querySelector("#set-save") as HTMLButtonElement).onclick = async () => {
       const host = (body.querySelector("#set-host") as HTMLInputElement).value.trim() || "127.0.0.1";
       const port = parseInt((body.querySelector("#set-port") as HTMLInputElement).value, 10);

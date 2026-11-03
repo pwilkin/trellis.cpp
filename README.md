@@ -24,7 +24,8 @@ Prebuilt binaries for Linux and Windows (Vulkan, ROCm, CUDA) are published on th
 
 New here? **Trellis Studio** is a one-command install that auto-detects your GPU
 runtime (CUDA / ROCm / Vulkan), downloads the server + weights, and gives you a
-drag-an-image → 3D desktop app with an interactive preview and a saved gallery.
+drag-an-image → 3D desktop app with a generation queue, output presets for game
+and modeler use, a textured / clay / wireframe preview and a saved gallery.
 
 ```bash
 # Linux (x86-64)
@@ -70,26 +71,74 @@ auto-framing to settle, captures each view via `toBlob`, and
 for anyone who wants image→3D without touching the command line. The one-command
 installer above auto-detects your GPU runtime, downloads the matching
 `trellis-server` build plus the ~16.5 GB of weights, and installs the app; on launch
-it starts and supervises the server for you, so the whole flow is drag-image →
-click → rotate the result.
+it starts and supervises the server for you.
+
+- **Generation queue.** Drop a batch of images and walk away. One job runs while the
+  rest wait as **Up next** cards: each keeps its own settings, can be edited before it
+  starts, and can be dragged to reorder. The running card names the current pipeline
+  stage and shows a percent estimate that learns your machine's timings.
+- **Output presets.** Pick what the asset is for (Icon, Lite, Character, Game, Hero or Handoff)
+  and Studio sets the face count and texture size, or choose **Custom**.
+- **Viewport options.** Switch the preview between **Textured**, **Clay** (the bare
+  form, to judge shape), **Wireframe** (triangles over clay, to judge density) and
+  **Color wire** (triangles in the texture's colors, which also reveals parts hidden
+  behind other surfaces).
+  **Model details** shows the face count, textures and settings, and **Export
+  handoff** packages everything a 3D modeler needs. Drop any `.glb` onto the viewer
+  to inspect it the same way, e.g. a `trellis-cli` output.
+- **Gallery.** Every result is saved locally and reloads with its source image and
+  settings, even after a restart.
 
 <p align="center">
-<img src="assets/trellis-studio.png" width="92%" alt="Trellis Studio — drop an image, generate a textured 3D model, preview it interactively">
+<img src="assets/trellis-studio.png" width="92%" alt="Trellis Studio: settings on the left, the generation queue with a running job and Up next cards, and the interactive 3D preview">
+</p>
+
+<p align="center">
+<a href="assets/studio/queue.png"><img src="assets/studio/queue.png" width="32%" alt="Queue: the running job shows its stage (Image conditioning, 2 of 8) and percent; an Up next card is expanded to edit its settings"></a>
+<a href="assets/studio/clay.png"><img src="assets/studio/clay.png" width="32%" alt="Viewer in Clay shading: the untextured form, while the next job generates"></a>
+<a href="assets/studio/wireframe.png"><img src="assets/studio/wireframe.png" width="32%" alt="Viewer in Wireframe shading: triangles over clay, showing the face density of a Game preset (50K faces) model"></a>
 </p>
 
 **Using it:**
 
-1. **Add an image** — drag-and-drop onto the drop zone, click to browse, or paste
-   from the clipboard.
-2. **Set options** (optional) — resolution (512 light / 1024 cascade / 1536 high),
-   seed, background removal (auto / birefnet / threshold), and UV unwrap
-   (xatlas / box). Defaults match the CLI.
-3. **Generate 3D** — this takes a few minutes; a live stage line shows progress.
-4. **Inspect** — rotate and zoom in the interactive preview (Google's three.js-based
-   `<model-viewer>`); **Reset view** re-frames the camera and **Save GLB…** exports
-   the model.
-5. **Reuse** — every result is kept in a local **gallery** (IndexedDB): click a
-   thumbnail to reload its model, input image, and settings — even after restarting
+1. **Add images.** Drag-and-drop onto the drop zone, click to browse, or paste from
+   the clipboard. Drop several at once: the first starts generating and the rest
+   wait in the queue.
+2. **Pick settings.** The settings panel sets what *new* images use:
+   - **Resolution**: 512 · fast / 1024 (512 → 1024 cascade, the default) /
+     1536 · high.
+   - **Background removal**: Auto (keep an image's own transparency, otherwise
+     BiRefNet) / Always (BiRefNet) / Simple (white-background keyer).
+   - **UV unwrap**: xatlas (default) / Box (faster, looser packing).
+   - **Output preset**: a face target + texture atlas chosen by what the asset is for:
+
+     | Preset | Faces | Atlas | For |
+     |---|---|---|---|
+     | Icon | 10K | 1024 | inventory and menu models |
+     | Lite | 25K | 1024 | background props, low-end devices |
+     | Character | 25K | 2048 | characters at gameplay distance: light mesh, sharp face texture |
+     | Game | 50K | 2048 | standard game props |
+     | Hero | 150K | 2048 | characters and close-up assets |
+     | Handoff | 300K | 4096 | maximum detail as reference for a 3D modeler (use 1536) |
+
+     **Custom** sets **Faces** and **Atlas** directly (these map to the CLI's
+     `--faces` and `--atlas`).
+   - **Seed**: type one, or roll the dice for a new one.
+3. **Generate 3D.** The running card shows the current pipeline stage by name and a
+   percent estimate, which learns this machine's timings over a few runs.
+   **Cancel** stops it.
+4. **Manage the queue.** Each **Up next** card keeps the settings it was queued
+   with. Click a card to edit them, drag cards to reorder, remove one, or
+   **Clear** the lot. The server runs one job at a time and the queue lives in memory.
+5. **Inspect.** Rotate and zoom in the interactive preview (Google's three.js-based
+   `<model-viewer>`). **Shading** switches between **Textured**, **Clay** (untextured
+   matte grey, to judge the form), **Wireframe** (triangles over clay, to judge
+   face density) and **Color wire** (triangles in the texture's colors, no surface). **Reset view** re-frames the camera, and **Model details** shows
+   the face count, textures and the settings used. **Save GLB** exports the model.
+   **Export handoff** writes a folder for a 3D modeler: the GLB, source image,
+   extracted textures, textured + clay turnaround sheets and a `notes.txt`.
+6. **Reuse.** Every result is kept in a local **gallery** (IndexedDB). Click a
+   thumbnail to reload its model, input image and settings, even after restarting
    the app.
 
 The **Settings** panel (gear icon) points the app at a different models directory,
@@ -162,7 +211,7 @@ Other useful CLI flags:
 | `--no-texture` | geometry only |
 | `--faces N` | QEM decimation face target, ≥ 1000 (default 300K @1024/1536, 150K @512). Lower gives lighter game/web assets and a faster UV unwrap; the baked texture keeps the surface detail |
 | `--decim GRID` | legacy cluster-grid decimation instead of QEM (`0` = keep the full-res mesh); not combinable with `--faces` |
-| `--atlas PX` | UV atlas size (default 2048 @1024 / 1024 @512) |
+| `--atlas PX` | UV atlas size, 256–8192 px: the side length of the baked base-color and metallic/roughness textures (default 2048 @1024 / 1024 @512) |
 | `--box-uv` | voxel-native 6-way box projection instead of the default xatlas unwrap (O(faces), faster, looser packing) |
 | `--seed N` | RNG seed |
 | `--model trellis\|pixal3d` | which family of flow weights `--models` holds (see [Pixal3D backend](docs/pixal3d/README.md)) |
@@ -216,7 +265,10 @@ GET  /health     -> "ok"
 POST /generate      multipart/form-data with an "image" file part; optional text
                     fields "seed", "resolution" (512/1024/1536), "bg_removal"
                     (threshold|birefnet), "faces" (QEM face target, >= 1000 or
-                    "auto"; 400 on an invalid value). Returns model/gltf-binary.
+                    "auto"), "atlas" (UV atlas px, 256..8192 or "auto"), "webp"
+                    (on|off; off = PNG textures, the most compatible for DCC
+                    tools), "texture" (on|off; off = geometry only). Invalid
+                    values return 400. Returns model/gltf-binary.
 ```
 
 Launch-time flags (including `--res`) set the per-request defaults; each request can
