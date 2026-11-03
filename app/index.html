@@ -5,108 +5,192 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Trellis Studio</title>
     <!-- The vendored <model-viewer> (three.js-based) is loaded at runtime from
-         public/vendor by viewer.ts, so Vite doesn't try to bundle it. -->
+         public/vendor by viewer.ts, so Vite doesn't try to bundle it.
+         Layout and tokens follow the design handoff "Trellis Studio — Queue,
+         Output Presets & Viewer" (see ui.css). -->
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand">
-        <span class="logo">◈</span> Trellis Studio
-      </div>
-      <div class="status">
-        <span id="backend-badge" class="badge" title="active backend">—</span>
-        <span id="server-dot" class="dot" title="server status"></span>
-        <span id="server-label" class="server-label">connecting…</span>
-        <button id="settings-btn" class="icon-btn" title="Settings">⚙</button>
-      </div>
-    </header>
-
-    <div id="setup-banner" class="banner hidden">
-      <span></span>
-      <button id="banner-settings" class="link-btn">Open settings</button>
-    </div>
-
-    <main class="workspace">
-      <section class="panel panel-left">
-        <div id="dropzone" class="dropzone" tabindex="0">
-          <img id="input-preview" class="input-preview hidden" alt="input" />
-          <div id="dropzone-hint" class="dropzone-hint">
-            <div class="dz-icon">⬆</div>
-            <div>Drop an image here</div>
-            <div class="muted">or click to browse</div>
+    <div class="app">
+      <!-- ===== Header ===== -->
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name">Trellis Studio</span>
+        </div>
+        <div class="topbar-right">
+          <span id="backend-badge" class="mono-badge" title="Active backend">—</span>
+          <div class="status">
+            <span id="server-dot" class="status-dot" title="Server status"></span>
+            <span id="server-label">connecting…</span>
           </div>
-          <input id="file-input" type="file" accept="image/*" hidden />
+          <button id="settings-btn" class="icon-btn" title="Settings" aria-label="Settings">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+          </button>
         </div>
+      </header>
 
-        <div class="controls">
-          <label class="ctl">
-            <span>Resolution</span>
-            <select id="ctl-res">
-              <option value="512">512 · light</option>
-              <option value="1024" selected>1024 · cascade</option>
-              <option value="1536">1536 · high</option>
-            </select>
-          </label>
-          <label class="ctl">
-            <span>Background removal</span>
-            <select id="ctl-bg">
-              <option value="auto" selected>auto</option>
-              <option value="birefnet">birefnet</option>
-              <option value="threshold">threshold</option>
-            </select>
-          </label>
-          <label class="ctl">
-            <span>UV unwrap</span>
-            <select id="ctl-uv">
-              <option value="xatlas" selected>xatlas</option>
-              <option value="box">box (faster)</option>
-            </select>
-          </label>
-          <label class="ctl">
-            <span>Texture</span>
-            <select id="ctl-tex">
-              <option value="on" selected>on</option>
-              <option value="off">off (geometry only)</option>
-            </select>
-          </label>
-          <label class="ctl">
-            <span>Seed</span>
-            <input id="ctl-seed" type="number" min="0" step="1" value="42" />
-          </label>
-        </div>
-
-        <button id="generate-btn" class="primary" disabled>Generate 3D</button>
-
-        <div id="progress" class="progress hidden">
-          <div class="bar"><div class="bar-fill"></div></div>
-          <div id="progress-stage" class="progress-stage muted">starting…</div>
-          <div id="progress-elapsed" class="progress-elapsed muted">0:00</div>
-          <button id="cancel-btn" class="link-btn">Cancel</button>
-        </div>
-      </section>
-
-      <section class="panel viewer-panel">
-        <div id="viewer-mount" class="viewer-mount"></div>
-        <div class="viewer-toolbar">
-          <button id="reset-view" class="tool-btn" disabled>Reset view</button>
-          <button id="save-glb" class="tool-btn" disabled>Save GLB…</button>
-          <span id="viewer-caption" class="viewer-caption muted"></span>
-        </div>
-      </section>
-    </main>
-
-    <section class="gallery-wrap">
-      <div class="gallery-head">
-        <span>Gallery</span>
-        <button id="clear-gallery" class="link-btn">Clear all</button>
+      <div id="setup-banner" class="banner hidden">
+        <span></span>
+        <button id="banner-settings" class="link-btn">Open settings</button>
       </div>
-      <div id="gallery" class="gallery"></div>
-    </section>
+
+      <main class="workspace">
+        <!-- ===== Queue panel (left) =====
+             Phase 1 keeps the current flow (stage an image, Generate); Phase 2
+             turns this into the auto-running job queue from the design. -->
+        <aside class="panel queue-panel">
+          <div class="panel-head">
+            <div class="panel-title">
+              <span>Queue</span>
+              <span id="queue-count" class="count-pill">0</span>
+            </div>
+          </div>
+
+          <div class="queue-body">
+            <!-- Running job -->
+            <div id="progress" class="job-card running hidden">
+              <div class="job-top">
+                <img id="progress-thumb" class="job-thumb" alt="" />
+                <div class="job-info">
+                  <div class="job-status">
+                    <span class="running-label"><span class="pulse-dot"></span>Generating</span>
+                    <span id="progress-elapsed" class="mono muted">0:00</span>
+                  </div>
+                  <div id="progress-name" class="job-name"></div>
+                  <div id="progress-chips" class="chips"></div>
+                </div>
+              </div>
+              <div class="bar"><div id="progress-bar" class="bar-fill indeterminate"></div></div>
+              <!-- Stage + percent from the server log (stages.ts). Clicking it shows the raw log line. -->
+              <div id="progress-stage-row" class="job-stage-row">
+                <span id="progress-stage" class="job-stage">Starting…</span>
+                <span id="progress-pct" class="mono job-pct"></span>
+              </div>
+              <div id="progress-log" class="job-log mono hidden"></div>
+              <div class="job-actions">
+                <button id="cancel-btn" class="ghost-btn danger">Cancel</button>
+              </div>
+            </div>
+
+            <!-- Up next -->
+            <div id="queue" class="up-next hidden">
+              <div class="section-label-row">
+                <span class="section-label">Up next</span>
+                <button id="clear-queue" class="link-btn">Clear</button>
+              </div>
+              <span id="queue-label" class="hidden"></span>
+              <div id="queue-list" class="queue-list"></div>
+            </div>
+
+            <!-- Drop zone (also a file input). Shows the staged image until Generate. -->
+            <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Add images">
+              <img id="input-preview" class="input-preview hidden" alt="Staged input" />
+              <div id="dropzone-hint" class="dropzone-hint">
+                <span class="dz-plus" aria-hidden="true">+</span>
+                <span id="dropzone-title" class="dz-title">Drop an image to start</span>
+                <span class="dz-sub">or click to browse · PNG, JPG, WEBP · GLB to view</span>
+              </div>
+              <input id="file-input" type="file" accept="image/*,.glb,model/gltf-binary" multiple hidden />
+            </div>
+
+            <!-- Settings for the next generation (Phase 2: the "New images use" defaults card) -->
+            <div class="settings-card">
+              <div class="settings-card-title">New images use</div>
+              <div id="settings-editor"></div>
+            </div>
+          </div>
+
+          <div class="queue-foot">
+            <button id="generate-btn" class="primary-btn" disabled>Generate 3D</button>
+          </div>
+        </aside>
+
+        <!-- ===== Viewer (right) ===== -->
+        <section class="panel viewer-panel">
+          <div class="viewer-floor" aria-hidden="true"></div>
+          <div id="viewer-mount" class="viewer-mount"></div>
+
+          <div id="viewer-empty" class="viewer-empty">
+            <span class="viewer-empty-title">Nothing to show yet</span>
+            <span class="viewer-empty-sub">Drop an image into the queue to generate a model, or a .glb here to view it.</span>
+          </div>
+
+          <!-- Model details: an (i) button; clicking it opens the info card below it.
+               The image button next to it shows the source image the model was made
+               from (generations only; hidden for a .glb opened from disk). -->
+          <div id="viewer-info" class="viewer-info hidden">
+            <div class="viewer-info-btns">
+            <button id="info-btn" class="info-btn" type="button" aria-expanded="false" aria-controls="info-panel"
+              title="Model details" aria-label="Model details">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <circle cx="12" cy="12" r="9.5" stroke="currentColor" stroke-width="1.6"></circle>
+                <circle cx="12" cy="7.6" r="1.25" fill="currentColor"></circle>
+                <path d="M12 11v6.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+              </svg>
+            </button>
+            <button id="source-btn" class="info-btn hidden" type="button" aria-expanded="false" aria-controls="source-panel"
+              title="Source image" aria-label="Source image">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="4" width="18" height="16" rx="2.5"></rect>
+                <circle cx="9" cy="10" r="1.8"></circle>
+                <path d="M21 16l-5-5-9 9"></path>
+              </svg>
+            </button>
+            </div>
+            <div id="info-panel" class="info-panel glass hidden">
+              <span id="viewer-tag" class="viewer-tag"></span>
+              <span id="viewer-name" class="viewer-name"></span>
+              <div id="viewer-chips" class="chips glass-chips"></div>
+              <span id="viewer-stats" class="viewer-stats"></span>
+            </div>
+            <div id="source-panel" class="source-panel glass hidden">
+              <img id="source-img" alt="Source image" />
+            </div>
+          </div>
+
+          <!-- Bottom bar: view tools on the left, export on the right. Always shown;
+               the buttons stay disabled until a model is loaded. -->
+          <div class="viewer-bottom">
+            <div class="viewer-toolbar">
+              <div id="shade-seg" class="seg glass" role="radiogroup" aria-label="Shading">
+                <button data-shade="textured" class="seg-opt on" role="radio" aria-checked="true">Textured</button>
+                <button data-shade="clay" class="seg-opt" role="radio" aria-checked="false"
+                  title="Untextured matte grey: the form without the paint">Clay</button>
+                <button data-shade="wireframe" class="seg-opt" role="radio" aria-checked="false"
+                  title="Triangles over clay: the face density">Wireframe</button>
+                <button data-shade="colorwire" class="seg-opt" role="radio" aria-checked="false"
+                  title="Triangles in the texture's colors, no surface: where each color sits, hidden parts included">Color wire</button>
+              </div>
+              <button id="reset-view" class="glass-btn" disabled>Reset view</button>
+            </div>
+            <div class="viewer-actions">
+              <button id="export-handoff" class="glass-btn" disabled
+                title="Write a folder for a 3D modeler: GLB, source image, textures, turnaround sheets and notes">Export handoff</button>
+              <button id="save-glb" class="primary-btn small" disabled>Save GLB</button>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <!-- ===== Gallery ===== -->
+      <footer class="gallery-wrap">
+        <div class="gallery-head">
+          <div class="panel-title small">
+            <span>Gallery</span>
+            <span id="gallery-count" class="count-pill">0</span>
+          </div>
+          <button id="clear-gallery" class="link-btn muted-link">Clear all</button>
+        </div>
+        <div id="gallery" class="gallery"></div>
+      </footer>
+    </div>
 
     <div id="settings-modal" class="modal hidden">
       <div class="modal-card">
         <div class="modal-head">
           <span>Settings</span>
-          <button id="settings-close" class="icon-btn">✕</button>
+          <button id="settings-close" class="icon-btn" aria-label="Close">✕</button>
         </div>
         <div id="settings-body" class="modal-body"></div>
       </div>

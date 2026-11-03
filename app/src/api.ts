@@ -1,9 +1,11 @@
 // HTTP client for the resident trellis-server (see src/trellis-server.cpp):
 //   GET  /health   -> "ok"
-//   POST /generate  multipart: image file + seed/resolution/bg_removal/uv/texture fields
+//   POST /generate  multipart: image file + seed/resolution/bg_removal/uv/faces/atlas/webp/texture fields,
+//                   + model/fov for Pixal3D
 //                   -> model/gltf-binary, or JSON {"error": "..."} on failure.
 
 import { apiBase, loadConfig } from "./config";
+import { fovOf } from "./options";
 import type { GenParams } from "./types";
 
 async function base(): Promise<string> {
@@ -31,7 +33,17 @@ function toForm(image: Blob, p: GenParams): FormData {
   fd.append("resolution", String(p.resolution));
   if (p.bgRemoval !== "auto") fd.append("bg_removal", p.bgRemoval);
   fd.append("uv", p.uv);
-  if (!p.texture) fd.append("texture", "off");
+  // Only sent when they differ from the server default, so the defaults work
+  // against any trellis-server version (older ones ignore unknown fields).
+  if (p.faces) fd.append("faces", String(p.faces));
+  if (p.atlas) fd.append("atlas", String(p.atlas));
+  if (p.textures === "png") fd.append("webp", "off");
+  if (p.texture === false) fd.append("texture", "off");
+  // TRELLIS.2 is the server default, so its requests stay exactly as before.
+  if (p.model === "pixal3d") {
+    fd.append("model", "pixal3d");
+    fd.append("fov", String(fovOf(p)));
+  }
   return fd;
 }
 

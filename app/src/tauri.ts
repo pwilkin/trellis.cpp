@@ -89,3 +89,25 @@ export async function saveToOutputDir(name: string, bytes: Uint8Array): Promise<
   await writeFile(path, bytes);
   return path;
 }
+
+/**
+ * Create `<output dir>/handoff/<name>` (Tauri only; the Rust side sanitises
+ * the name) and write `files` into it. Returns the folder path.
+ */
+export async function writeHandoffFolder(
+  name: string,
+  files: { name: string; data: Blob }[],
+): Promise<string> {
+  const { writeFile } = await import("@tauri-apps/plugin-fs");
+  const { join } = await import("@tauri-apps/api/path");
+  const dir = await invoke<string>("handoff_dir", { name });
+  for (const f of files) {
+    await writeFile(await join(dir, f.name), new Uint8Array(await f.data.arrayBuffer()));
+  }
+  return dir;
+}
+
+/** Open a folder inside the output dir in the OS file browser (Tauri only). */
+export async function revealInOutput(path: string): Promise<void> {
+  if (isTauri()) await invoke("reveal_in_output", { path });
+}
