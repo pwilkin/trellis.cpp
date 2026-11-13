@@ -130,6 +130,11 @@ void print_usage(const char* argv0, bool server) {
         "      --steps N           flow sampler steps (default 12). Lower is faster and\n"
         "                          rougher; useful for backend bring-up, where a CPU and\n"
         "                          an NPU run at the same N stay directly comparable.\n"
+        "      --ss-control PATH   shape guide: start the sparse-structure flow from this SS-VAE\n"
+        "                          latent (f32 [4096][8], see tools/ss_control_encode.py) instead\n"
+        "                          of pure noise, so the object follows a rough guide shape\n"
+        "      --ss-control-strength S  0..1, how closely to follow the guide (default 0.5):\n"
+        "                          0 = image only, 0.6+ = follows the guide closely\n"
         "      --res 512|1024|1536 geometry resolution\n"
         "      --max-tokens N      HR token budget              (default 49152)\n"
         "      --bg-removal MODE   threshold | birefnet   (default: auto -- a pre-matted\n"
@@ -282,6 +287,18 @@ bool parse_args(int argc, char** argv, TrellisParams& p) {
         else if (a == "--host")                 { const char* v = need(a.c_str()); if (!v) return false; p.host = v; }
         else if (a == "--port")                 { const char* v = need(a.c_str()); if (!v) return false; p.port = atoi(v); }
         else if (a == "--voxply")               { p.voxply = true; }
+        else if (a == "--ss-control")           { const char* v = need(a.c_str()); if (!v) return false; p.ss_control = v; }
+        else if (a == "--ss-control-strength")  {
+            const char* v = need(a.c_str()); if (!v) return false;
+            char* end = nullptr;
+            errno = 0;
+            const float s = std::strtof(v, &end);
+            if (end == v || *end || errno == ERANGE || !std::isfinite(s) || s < 0.0f || s > 1.0f) {
+                fprintf(stderr, "[trellis] --ss-control-strength must be a number in [0, 1]\n");
+                return false;
+            }
+            p.ss_control_strength = s;
+        }
         else if (a == "--dump-slat")            { p.dump_slat = true; }
         else if (!a.empty() && a[0] == '-')     { fprintf(stderr, "[trellis] unknown option: %s\n", a.c_str()); return false; }
         else if (positional == 0)               { p.image  = a; positional = 1; }

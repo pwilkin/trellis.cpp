@@ -25,6 +25,12 @@ struct SamplerParams {
     float gi1               = 1.0f;
     float rescale_t         = 1.0f;
     float sigma_min         = 1e-5f;
+    // SpaceControl (SDEdit-style) start: when x0 is set and start_u > 0, the sampler starts
+    // at t0 = rescale(1 - start_u) from t0*noise + (1-t0)*x0. start_u is CONTINUOUS: the
+    // first step runs from t0 down to the next grid time, so every strength is distinct
+    // (rounding to whole steps made 0.05..0.35 all start from the same place).
+    float        start_u    = 0.0f;
+    const float* x0         = nullptr;   // same layout/size as the noise sample
 };
 
 // One branch of the classifier-free guidance pair. `cond` is the cross-attention context that
