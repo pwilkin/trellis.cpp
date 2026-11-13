@@ -226,9 +226,22 @@ std::vector<float> sample_flow(const FlowFwd& fwd, std::vector<float> sample,
                tty ? "\r" : "", bar, done, sp.steps, el, eta, tty ? "" : "\n");
         fflush(stdout);
     };
-    progress(0);
-    for (int i = 0; i < sp.steps; ++i) {
-        const float t = ts[i], tprev = ts[i + 1];
+    int i0 = 0;
+    float tstart = ts[0];
+    if (sp.x0 && sp.start_u > 0.0f) {
+        const float u0 = 1.0f - std::min(sp.start_u, 1.0f);
+        const float t0 = sp.rescale_t * u0 / (1.0f + (sp.rescale_t - 1.0f) * u0);
+        // The step that contains t0: ts[i0] >= t0 > ts[i0 + 1].
+        i0 = sp.steps;
+        for (int i = 0; i < sp.steps; ++i)
+            if (ts[i + 1] < t0) { i0 = i; break; }
+        tstart = t0;
+        for (size_t k = 0; k < Nst; ++k) sample[k] = t0 * sample[k] + (1.0f - t0) * sp.x0[k];
+        printf("      [flow] control start: u=%.3f t0=%.3f (step %d/%d)\n", sp.start_u, t0, i0, sp.steps);
+    }
+    progress(i0);
+    for (int i = i0; i < sp.steps; ++i) {
+        const float t = (i == i0) ? std::min(tstart, ts[i]) : ts[i], tprev = ts[i + 1];
         const float gs = (sp.gi0 <= t && t <= sp.gi1) ? sp.guidance_strength : 1.0f;
         const float tscaled = 1000.0f * t;
         if (gs == 1.0f) {

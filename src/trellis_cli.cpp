@@ -391,6 +391,21 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         trellis::DitRunner* run = trellis::make_dense_runner(m, p, 16, Lc);
         trellis::FlowFwd fwd = [&](const vector<float>& x, float ts, const trellis::FlowCond& c){ return run->forward(x, ts, c); };
         trellis::SamplerParams sp; sp.steps=(cfg.steps>0?cfg.steps:12); sp.guidance_strength=cfg.gss; sp.guidance_rescale=0.7f; sp.gi0=0.6f; sp.gi1=1.0f; sp.rescale_t=5.0f;
+        vector<float> ss_x0;
+        if (!cfg.ss_control.empty()) {
+            ss_x0.resize(8*4096);
+            FILE* cf = fopen(cfg.ss_control.c_str(), "rb");
+            if (!cf || fread(ss_x0.data(), sizeof(float), ss_x0.size(), cf) != ss_x0.size()) {
+                if (cf) fclose(cf);
+                fprintf(stderr, "--ss-control: cannot read %zu floats from %s\n", ss_x0.size(), cfg.ss_control.c_str());
+                return 1;
+            }
+            fclose(cf);
+            const float s = cfg.ss_control_strength;   // validated to [0, 1] by the parser
+            sp.x0 = ss_x0.data();
+            sp.start_u = s;
+            printf("      shape guide: control latent %s, strength %.2f\n", cfg.ss_control.c_str(), s);
+        }
         vector<float> z = trellis::sample_flow(fwd, noise(8*4096),
                               trellis::FlowCond(cond.data(), pix ? pc.proj.data()     : nullptr),
                               trellis::FlowCond(neg.data(),  nullptr), sp);  // [8,4096] ne0=8

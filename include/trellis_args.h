@@ -94,6 +94,8 @@ struct TrellisParams {
     bool require_gpu = false;   // refuse CPU fallback if no GPU is usable
     float gss = 7.5f;           // sparse-structure guidance strength
     float gsh = 7.5f;           // shape-SLAT guidance strength
+    std::string ss_control;     // shape guide: SS-VAE latent of a control shape, f32 [4096][8]
+    float ss_control_strength = 0.5f;  // fraction of the SS flow time replaced by the control (0..1, continuous)
     bool voxply = false;        // dump out/myvox.ply              (debug)
     bool dump_slat = false;     // dump /tmp/hr_slat.bin           (debug)
     bool dump_bg = false;       // also write the bg-removal cutout as <out>_cutout.png
