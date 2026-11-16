@@ -165,6 +165,7 @@ Other useful CLI flags:
 | `--atlas PX` | UV atlas size (default 2048 @1024 / 1024 @512) |
 | `--box-uv` | voxel-native 6-way box projection instead of the default xatlas unwrap (O(faces), faster, looser packing) |
 | `--seed N` | RNG seed |
+| `--save-coarse PATH` / `--load-coarse PATH` | save the coarse stage (sparse structure + res-32 shape latent) and start a later run from it. That stage does not depend on `--res`, so a 1024 run after a 512 one of the same image and seed skips the structure flow and the LR shape flow (and the other way round, where it is the whole shape stage). The file records seed, steps, guidance, precision, backend, a hash of the cutout and the weight sizes; if they do not match it is ignored with a note and the stage is computed. The result is the same as a full run |
 | `--model trellis\|pixal3d` | which family of flow weights `--models` holds (see [Pixal3D backend](docs/pixal3d/README.md)) |
 | `--steps N` | flow sampler steps (default 12; lower values are useful for backend bring-up) |
 | `--backend NAME` | select a registered ggml backend explicitly, such as `HTP`, `Vulkan`, or `CPU` |

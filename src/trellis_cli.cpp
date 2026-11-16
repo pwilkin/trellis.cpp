@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <cstring>
 #include <random>
 #include <vector>
 #include <string>
@@ -82,6 +83,82 @@ static const float SHAPE_MEAN[32]={0.781296f,0.018091f,-0.495192f,-0.558457f,1.0
 static const float SHAPE_STD[32]={5.972266f,4.706852f,5.445010f,5.209927f,5.320220f,4.547237f,5.020802f,5.444004f,5.226681f,5.683095f,4.831436f,5.286469f,5.652043f,5.367606f,5.525084f,4.730578f,4.805265f,5.124013f,5.530808f,5.619001f,5.103930f,5.417670f,5.269677f,5.547194f,5.634698f,5.235274f,6.110351f,5.511298f,6.237273f,4.879207f,5.347008f,5.405691f};
 static const float TEX_MEAN[32]={3.501659f,2.212398f,2.226094f,0.251093f,-0.026248f,-0.687364f,0.439898f,-0.928075f,0.029398f,-0.339596f,-0.869527f,1.038479f,-0.972385f,0.126042f,-1.129303f,0.455149f,-1.209521f,2.069067f,0.544735f,2.569128f,-0.323407f,2.293000f,-1.925608f,-1.217717f,1.213905f,0.971588f,-0.023631f,0.106750f,2.021786f,0.250524f,-0.662387f,-0.768862f};
 static const float TEX_STD[32]={2.665652f,2.743913f,2.765121f,2.595319f,3.037293f,2.291316f,2.144656f,2.911822f,2.969419f,2.501689f,2.154811f,3.163343f,2.621215f,2.381943f,3.186697f,3.021588f,2.295916f,3.234985f,3.233086f,2.260140f,2.874801f,2.810596f,3.292720f,2.674999f,2.680878f,2.372054f,2.451546f,2.353556f,2.995195f,2.379849f,2.786195f,2.775190f};
+
+// ---- coarse stage on disk (--save-coarse / --load-coarse) ----------------------------------
+// The sparse structure and the res-32 shape latent depend on the image, the seed and the models,
+// not on the target resolution: a 512 run and the LR half of a 1024 cascade compute the same
+// thing. Saving it lets a later run of the same image and seed skip both flows.
+//
+// File: magic[8], u32 length + text describing the run it belongs to, u32 n, int32 xyz[n*3]
+// (the decoded structure @res64), float32 latent[32 * tokens] (normalized, tokens = the
+// structure pooled to res32, in the order ss_coords() emits them).
+struct CoarseStage {
+    vector<std::array<int,3>> coords64;   // decoded sparse structure @res64
+    vector<float> slat;                   // normalized shape latent, [32, tokens] token-major
+};
+static const char COARSE_MAGIC[8] = {'T','R','L','C','R','S','0','1'};
+
+// The res-32 token grid the shape flow runs on: every cell with an occupied res-64 child, in
+// x-major order -- exactly what ss_coords(logits, 64, 32) yields for the same logits.
+static vector<std::array<int,3>> coarse_tokens(const vector<std::array<int,3>>& coords64) {
+    std::set<std::array<int,3>> cells;
+    for (const auto& c : coords64) cells.insert({c[0] / 2, c[1] / 2, c[2] / 2});
+    return vector<std::array<int,3>>(cells.begin(), cells.end());
+}
+
+static uint64_t fnv1a64(const unsigned char* p, size_t n) {
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+    return h;
+}
+static long long file_size_of(const std::string& path) {
+    std::error_code ec;
+    const auto s = std::filesystem::file_size(path, ec);
+    return ec ? -1 : (long long)s;
+}
+
+static bool write_coarse(const std::string& path, const std::string& fp, const CoarseStage& st) {
+    const std::string tmp = path + ".tmp";
+    FILE* f = fopen(tmp.c_str(), "wb");
+    if (!f) return false;
+    const uint32_t fl = (uint32_t)fp.size(), n = (uint32_t)st.coords64.size();
+    bool ok = fwrite(COARSE_MAGIC, 1, 8, f) == 8 && fwrite(&fl, 4, 1, f) == 1 &&
+              fwrite(fp.data(), 1, fl, f) == fl && fwrite(&n, 4, 1, f) == 1 &&
+              fwrite(st.coords64.data(), sizeof(int) * 3, n, f) == n &&
+              fwrite(st.slat.data(), sizeof(float), st.slat.size(), f) == st.slat.size();
+    ok = (fclose(f) == 0) && ok;
+    std::error_code ec;
+    if (ok) std::filesystem::rename(tmp, path, ec);   // complete or absent, never half written
+    if (!ok || ec) { std::filesystem::remove(tmp, ec); return false; }
+    return true;
+}
+
+// Returns false with a reason in `why` when the file is unreadable or belongs to another run.
+static bool read_coarse(const std::string& path, const std::string& fp, CoarseStage& st, std::string& why) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) { why = "cannot open " + path; return false; }
+    char magic[8]; uint32_t fl = 0, n = 0;
+    bool ok = fread(magic, 1, 8, f) == 8 && std::memcmp(magic, COARSE_MAGIC, 8) == 0 &&
+              fread(&fl, 4, 1, f) == 1 && fl < 4096;
+    std::string got(ok ? fl : 0, '\0');
+    ok = ok && fread(&got[0], 1, fl, f) == fl;
+    if (ok && got != fp) { fclose(f); why = "made for a different run (" + got + ")"; return false; }
+    ok = ok && fread(&n, 4, 1, f) == 1 && n > 0 && n <= 64u * 64u * 64u;
+    if (ok) {
+        st.coords64.resize(n);
+        ok = fread(st.coords64.data(), sizeof(int) * 3, n, f) == n;
+        for (size_t i = 0; ok && i < n; ++i) for (int a = 0; a < 3; ++a)
+            ok = ok && st.coords64[i][a] >= 0 && st.coords64[i][a] < 64;
+    }
+    if (ok) {
+        st.slat.resize((size_t)32 * coarse_tokens(st.coords64).size());
+        ok = fread(st.slat.data(), sizeof(float), st.slat.size(), f) == st.slat.size() && fgetc(f) == EOF;
+    }
+    fclose(f);
+    if (!ok) { why = "not a complete coarse stage file"; return false; }
+    for (float v : st.slat) if (!std::isfinite(v)) { why = "latent is not finite"; return false; }
+    return true;
+}
 
 int trellis_run(const trellis::TrellisParams& cfg) {
     namespace fs = std::filesystem;
@@ -378,9 +455,34 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         return pc;
     };
 
-    printf("[3/6] sparse-structure flow + decode\n");
-    vector<std::array<int,3>> coords;
-    {
+    // --load-coarse / --save-coarse: what identifies a coarse stage. Everything that feeds the
+    // structure flow and the res-32 shape flow is in here; the target resolution is not.
+    std::string coarse_fp;
+    if (!cfg.load_coarse.empty() || !cfg.save_coarse.empty()) {
+        char b[320];
+        // Precision and backend change the numbers too, so they are part of the identity.
+        snprintf(b, sizeof b, "seed=%u steps=%d gss=%.4f gsh=%.4f f32=%d fa=%d be=%s fam=%s cut=%d:%016llx ssf=%lld shf=%lld",
+                 run_seed, cfg.steps > 0 ? cfg.steps : 12, cfg.gss, cfg.gsh, F32 ? 1 : 0, trellis::g_fa_fast,
+                 requested_backend.empty() ? "auto" : requested_backend.c_str(), pix ? "pixal3d" : "trellis2",
+                 cut_sz, (unsigned long long)fnv1a64(cutout.data(), cutout.size()),
+                 file_size_of(M + FP + "ss_flow.gguf"), file_size_of(M + FP + "shape_flow_512.gguf"));
+        coarse_fp = b;
+    }
+    CoarseStage coarse_in; bool coarse_loaded = false;
+    if (!cfg.load_coarse.empty()) {
+        std::string why;
+        coarse_loaded = read_coarse(cfg.load_coarse, coarse_fp, coarse_in, why);
+        if (!coarse_loaded) printf("      (coarse stage not reused: %s -- computing it)\n", why.c_str());
+    }
+
+    printf("[3/6] sparse-structure flow + decode%s\n", coarse_loaded ? " (reused)" : "");
+    vector<std::array<int,3>> coords, coarse64;   // the structure @res32 (shape tokens) and @res64
+    if (coarse_loaded) {
+        // Draw and drop the noise this flow would have used: the stages that follow must find the
+        // random stream exactly where a full run leaves it.
+        (void)noise(8*4096);
+        coarse64 = coarse_in.coords64; coords = coarse_tokens(coarse64);
+    } else {
         trellis::Model m = trellis::Model::load(M + FP + "ss_flow.gguf", gpu);
         trellis::DiTParams p; p.in_ch = 8; p.out_ch = 8; p.d_cond = 1024; p.cast_f32 = F32;
         p.proj_ch = proj_ch_of(m); p.proj_mode = p.proj_ch > 0;
@@ -406,6 +508,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         trellis::Model d = trellis::Model::load(M + "/ss_dec.gguf", ss_dec_on_cpu ? -1 : gpu);
         trellis::g_backend = saved_backend;
         vector<float> logits = trellis::ss_decode(d, zdec); d.free();
+        coarse64 = trellis::ss_coords(logits, 64, 64);   // what --save-coarse stores
         coords = trellis::ss_coords(logits, 64, 32);
     }
     if (cfg.voxply) { FILE*f=fopen("out/myvox.ply","wb"); fprintf(f,"ply\nformat binary_little_endian 1.0\nelement vertex %zu\nproperty float x\nproperty float y\nproperty float z\nelement face 0\nproperty list uchar int vertex_indices\nend_header\n",coords.size()); for(auto&c:coords){float p[3]={(c[0]+0.5f)/32-0.5f,(c[1]+0.5f)/32-0.5f,(c[2]+0.5f)/32-0.5f}; fwrite(p,4,3,f);} fclose(f); }
@@ -429,6 +532,13 @@ int trellis_run(const trellis::TrellisParams& cfg) {
                           const float* cnd, const float* ncnd, int lc,
                           int grid_res, int S, int naf_out) {
         const int n = (int)cds.size();
+        // --load-coarse: grid 32 is the res-32 flow (the whole shape stage of a 512 run, the LR
+        // half of a cascade) and its result is on disk. Its noise is drawn and dropped, as above.
+        if (coarse_loaded && grid_res == 32) {
+            (void)noise((size_t)32 * n);
+            printf("      shape latent @res32 reused (%d tokens)\n", n);
+            return coarse_in.slat;
+        }
         trellis::Model m = trellis::Model::load(path, gpu);
         trellis::DiTParams p; p.in_ch = 32; p.out_ch = 32; p.d_cond = 1024; p.cast_f32 = F32;
         p.proj_ch = proj_ch_of(m); p.proj_mode = p.proj_ch > 0;
@@ -442,6 +552,15 @@ int trellis_run(const trellis::TrellisParams& cfg) {
                                trellis::FlowCond(ncnd, nullptr), sp);   // [32,n]
         delete run; m.free();
         return sn;
+    };
+
+    // --save-coarse: the structure and the res-32 latent, written as soon as both exist.
+    auto save_coarse = [&](const vector<float>& slat32) {
+        if (cfg.save_coarse.empty() || coarse_loaded) return;
+        if (write_coarse(cfg.save_coarse, coarse_fp, CoarseStage{coarse64, slat32}))
+            printf("      [coarse] saved %s\n", cfg.save_coarse.c_str());
+        else
+            fprintf(stderr, "      [warn] could not write the coarse stage to %s\n", cfg.save_coarse.c_str());
     };
 
     vector<float> slat_norm, slat_dn;        // normalized (for tex concat) and denormalized (for decode)
@@ -472,6 +591,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         for (size_t n = 0; n < coords.size(); ++n) for (int c = 0; c < 32; ++c)
             lr_dn[(size_t)c + 32*n] = lr_norm[(size_t)c + 32*n]*SHAPE_STD[c] + SHAPE_MEAN[c];
         slat_stats("LR slat (res32, decodes OK via upsample)", lr_dn);
+        save_coarse(lr_norm);
         // (2) decoder.upsample(LR slat, 4) -> res512 coords
         vector<std::array<int,3>> hr_coords;
         { trellis::Model m = trellis::Model::load(M + "/shape_dec.gguf", gpu);
@@ -533,6 +653,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         slat_norm = shape_flow(M + FP + "shape_flow_512.gguf", coords, cond.data(), neg.data(), Lc,
                                /*grid_res=*/32, /*S=*/512, /*naf_out=*/512);
     }
+    if (!cascade) save_coarse(slat_norm);
     const int N = (int)shc.size();
     slat_dn.resize(slat_norm.size());
     for (int n = 0; n < N; ++n) for (int c = 0; c < 32; ++c)

@@ -160,6 +160,11 @@ void print_usage(const char* argv0, bool server) {
         "                          exit (skips remesh/decimate/UV/bake/GLB) -- for external\n"
         "                          post-processing pipelines\n"
         "      --bg-only           background removal only: write the cutout and skip the rest\n"
+        "      --save-coarse PATH  write the coarse stage (sparse structure + res-32 shape latent)\n"
+        "                          to PATH once it is computed\n"
+        "      --load-coarse PATH  reuse a coarse stage of the same image, seed and models: skips\n"
+        "                          the structure flow and the res-32 shape flow, e.g. for a 1024\n"
+        "                          run after a 512 one. The result is the same as a full run\n"
         "      --retopo GRID FIRST_FACES FINAL_FACES  native quad export (Linux, retopo build)\n"
         "      --retopo-atlas PX   quad atlas size: 1024, 2048, 4096 (default 4096)\n"
         "      --retopo-no-weld-fill  skip initial weld/fill before tetra remesh\n"
@@ -260,6 +265,8 @@ bool parse_args(int argc, char** argv, TrellisParams& p) {
                                                   else { fprintf(stderr, "[trellis] --normal-map must be on or off\n"); return false; } }
         else if (a == "--dump-bg")              { p.dump_bg = true; }
         else if (a == "--bg-only")              { p.bg_only = true; p.dump_bg = true; }
+        else if (a == "--save-coarse")          { const char* v = need(a.c_str()); if (!v) return false; p.save_coarse = v; }
+        else if (a == "--load-coarse")          { const char* v = need(a.c_str()); if (!v) return false; p.load_coarse = v; }
         else if (a == "--retopo")               { const char* g=need(a.c_str()); if (!g) return false;
                                                   const char* f=need(a.c_str()); if (!f) return false;
                                                   const char* q=need(a.c_str()); if (!q) return false;
