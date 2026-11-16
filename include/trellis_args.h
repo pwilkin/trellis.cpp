@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
+#include "multiview.h"
 
 namespace trellis {
 
@@ -126,6 +128,19 @@ struct TrellisParams {
     bool retopo_dual_pbr = false;
     std::string retopo_workdir = ".codex/retopo/runs";
 
+    // ---- multi-view conditioning (docs/spec/30-multiview.md) ----
+    std::vector<ViewSpec> views;  // --view PATH[:AZ[:EL]] (repeatable). `image` (positional or
+                                  //   --image) is the front view and comes first.
+    float       blend_temp = 2.0f;   // --blend-temp: softmax temperature of the per-token blend
+    std::string front_axis = "-y";   // --front-axis -y|+y|+x|-x|ref-z|ref-x
+    float       yaw_offset = 0.0f;   // --yaw-offset DEG, added to every view's azimuth
+    unsigned    mv_stages  = 7;      // --mv-stages ss,shape,tex (bit0 ss, bit1 shape, bit2 tex)
+
+    // ---- mesh refinement (--refine-mesh, docs/spec/31-mesh-refine.md) ----
+    std::string refine_mesh;         // --refine-mesh in.glb|in.obj
+    int         refine_coords  = -1; // --refine-coords auto|encoder|voxel (-1 auto, 0 voxel, 1 encoder)
+    bool        refine_restore = true;  // --refine-restore-transform on|off
+
     bool help = false;          // --help requested
 
     // 512 -> light single-res path; 1024/1536 -> cascade with that HR target.
@@ -142,6 +157,15 @@ void print_usage(const char* argv0, bool server);
 // error OR when --help was requested; check p.help to tell them apart.
 bool parse_args(int argc, char** argv, TrellisParams& p);
 bool parse_camera_arg(const std::string& name, const char* value, TrellisParams& p, std::string& error);
+
+// Multi-view stage list ("ss,shape,tex", "all", "none") -> TrellisParams::mv_stages bits.
+bool parse_mv_stages(const std::string& value, unsigned& out, std::string& error);
+// The ordered view list of a run: `image` (when set) is view 0 at az 0 / el 0, then `views`.
+// Shared by trellis-cli and trellis-server. Fails on no view, more than kMaxViews, a bad
+// --blend-temp / --front-axis, or a view list the selected family cannot use.
+bool resolve_views(const TrellisParams& p, std::vector<ViewSpec>& out, std::string& error);
+// BlendParams from the run's --blend-temp / --front-axis / --yaw-offset.
+bool blend_params_of(const TrellisParams& p, BlendParams& out, std::string& error);
 
 // ---- QEM face target (--faces / server field "faces") ----
 // The default postprocess quadric-simplifies the remeshed surface to a face budget before

@@ -15,10 +15,24 @@
 //                      only, like --no-texture), and "normal_map" (on|off;
 //                      on = bake a tangent-space normal map, like --normal-map).
 //                      Returns model/gltf-binary.
-//   POST /jobs        asynchronous form of /generate (same fields) -> 202
-//                    {"id","status","position"}. Use it for long runs: /generate holds one
-//                    request open for the whole run, which a browser or proxy may time out
-//                    (Firefox gives up after 300 s).
+//
+//                    Multi-view (docs/spec/30-multiview.md): send several "image" parts
+//                    of the same object plus "azimuths" (comma list, one per image in
+//                    the same order; degrees or front|back|left|right|top|bottom) and
+//                    optionally "elevations" (default 0). "azimuths" is required with
+//                    more than one image. Also "blend_temp", "front_axis"
+//                    (-y|+y|+x|-x|ref-z|ref-x) and "yaw_offset". One image and no angle
+//                    fields is exactly the single-image request.
+//   POST /refine      multipart/form-data with a "mesh" file part (GLB or OBJ, detected by
+//                    magic) and one or more "image" parts plus every /generate field
+//                    (angles, blend, seed, resolution, texture, faces, atlas, ...), and
+//                    "refine_coords" (auto|encoder|voxel) and "restore_transform" (on|off).
+//                    Re-generates the mesh from the view(s) on the mesh's own voxels
+//                    (docs/spec/31-mesh-refine.md). model=pixal3d -> 400.
+//   POST /jobs        asynchronous form of the two above (same fields; "task"=refine selects
+//                    /refine) -> 202 {"id","status","position"}. Use it for long runs: the
+//                    synchronous endpoints hold one request open for the whole run, which a
+//                    browser or proxy may time out (Firefox gives up after 300 s).
 //   GET  /jobs/{id}         -> {"status": queued|running|done|error, "position", "elapsed",
 //                              "error"}
 //   GET  /jobs/{id}/result  -> model/gltf-binary (409 while queued/running)
@@ -49,6 +63,8 @@
 #include <utility>
 #include <string>
 #include <stdexcept>
+#include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <vector>
 
@@ -144,6 +160,84 @@ bool apply_common_fields(const httplib::Request& req, trellis::TrellisParams& p,
         p.webp = (w == "off" || w == "0" || w == "false") ? 0
                : (w == "on"  || w == "1" || w == "true")  ? 1 : -1;
     }
+    // Multi-view blend knobs (meaningful with several images).
+    if (req.has_file("blend_temp")) {
+        const std::string& v = req.get_file_value("blend_temp").content;
+        char* end = nullptr;
+        const float f = std::strtof(v.c_str(), &end);
+        if (end == v.c_str() || *end || !std::isfinite(f) || f <= 0) { bad_request(res, "blend_temp must be a positive number"); return false; }
+        p.blend_temp = f;
+    }
+    if (req.has_file("front_axis")) {
+        const std::string& v = req.get_file_value("front_axis").content;
+        trellis::FrontAxis fa;
+        if (!trellis::parse_front_axis(v, fa)) { bad_request(res, "front_axis must be one of -y, +y, +x, -x, ref-z, ref-x"); return false; }
+        p.front_axis = v;
+    }
+    if (req.has_file("yaw_offset")) {
+        const std::string& v = req.get_file_value("yaw_offset").content;
+        char* end = nullptr;
+        const float f = std::strtof(v.c_str(), &end);
+        if (end == v.c_str() || *end || !std::isfinite(f)) { bad_request(res, "yaw_offset must be a number of degrees"); return false; }
+        p.yaw_offset = f;
+    }
+    return true;
+}
+
+std::vector<std::string> split_commas(const std::string& s) {
+    std::vector<std::string> out;
+    size_t b = 0;
+    for (;;) {
+        const size_t e = s.find(',', b);
+        std::string t = s.substr(b, e == std::string::npos ? std::string::npos : e - b);
+        while (!t.empty() && std::isspace((unsigned char)t.front())) t.erase(t.begin());
+        while (!t.empty() && std::isspace((unsigned char)t.back())) t.pop_back();
+        out.push_back(t);
+        if (e == std::string::npos) break;
+        b = e + 1;
+    }
+    return out;
+}
+
+// The angles of `n` uploaded images from the "azimuths" / "elevations" fields. Each azimuth goes
+// through parse_view_spec (so names work and the CLI's rules apply). Returns false with `error`.
+bool parse_view_angles(const httplib::Request& req, size_t n, std::vector<trellis::ViewSpec>& out,
+                       std::string& error) {
+    out.assign(n, trellis::ViewSpec{});
+    const bool has_az = req.has_file("azimuths"), has_el = req.has_file("elevations");
+    if (n > 1 && !has_az) { error = "azimuths is required when more than one image is sent"; return false; }
+    if (has_az) {
+        const auto az = split_commas(req.get_file_value("azimuths").content);
+        if (az.size() != n) {
+            error = "azimuths has " + std::to_string(az.size()) + " entries for " + std::to_string(n) + " image(s)";
+            return false;
+        }
+        for (size_t i = 0; i < n; ++i) {
+            trellis::ViewSpec v;
+            if (!trellis::parse_view_spec("x:" + az[i], v, error) || v.image != "x") {
+                error = "bad azimuth '" + az[i] + "'";
+                return false;
+            }
+            out[i].az_deg = v.az_deg;
+            out[i].el_deg = v.el_deg;   // a name like "top" carries its elevation
+        }
+    }
+    if (has_el) {
+        const auto el = split_commas(req.get_file_value("elevations").content);
+        if (el.size() != n) {
+            error = "elevations has " + std::to_string(el.size()) + " entries for " + std::to_string(n) + " image(s)";
+            return false;
+        }
+        for (size_t i = 0; i < n; ++i) {
+            char* end = nullptr;
+            const float f = std::strtof(el[i].c_str(), &end);
+            if (el[i].empty() || *end || !std::isfinite(f) || f < -90 || f > 90) {
+                error = "bad elevation '" + el[i] + "' (degrees within [-90, 90])";
+                return false;
+            }
+            out[i].el_deg = f;
+        }
+    }
     return true;
 }
 
@@ -174,11 +268,13 @@ void json_error(httplib::Response& res, int status, const std::string& msg) {
 struct Job {
     enum class State { Queued, Running, Done, Error, Cancelled };
     std::string id;
-    bool sync = false;               // /generate: the handler waits and then drops it
+    bool refine = false;
+    bool sync = false;               // /generate, /refine: the handler waits and then drops it
     trellis::TrellisParams p;
     std::string stem;
     std::vector<std::string> staged; // file paths, parallel to `bytes`
     std::vector<std::string> bytes;
+    size_t n_images = 0;
     State state = State::Queued;
     std::string glb;
     std::string error;
@@ -197,19 +293,60 @@ const char* state_name(Job::State s) {
     return "?";
 }
 
-// Validates a /generate or /jobs request into a Job. Returns nullptr with a 400 (or 500)
-// already set on `res`.
+// Validates a /generate, /refine or /jobs request into a Job. Returns nullptr with a 400 (or
+// 500) already set on `res`.
 std::shared_ptr<Job> make_job(const httplib::Request& req, httplib::Response& res,
-                              const trellis::TrellisParams& base) {
+                              const trellis::TrellisParams& base, bool refine) {
+    if (refine && !req.has_file("mesh")) {
+        json_error(res, 400, "missing 'mesh' file part (GLB or OBJ)");
+        return nullptr;
+    }
     if (!req.has_file("image")) {
         json_error(res, 400, "missing 'image' file part");
         return nullptr;
     }
+    const auto images = req.get_file_values("image");
+
     auto job = std::make_shared<Job>();
+    job->refine = refine;
+    job->n_images = images.size();
     // Per-request params start from the launch defaults, then apply overrides.
     trellis::TrellisParams& p = job->p;
     p = base;
     if (!apply_common_fields(req, p, res)) return nullptr;
+    std::vector<trellis::ViewSpec> angles;
+    {
+        std::string error;
+        if (!parse_view_angles(req, images.size(), angles, error)) { bad_request(res, error); return nullptr; }
+        if ((int)images.size() > trellis::kMaxViews) {
+            bad_request(res, "at most " + std::to_string(trellis::kMaxViews) + " images are supported");
+            return nullptr;
+        }
+        if ((images.size() > 1 || refine) && p.family == trellis::ModelFamily::Pixal3D) {
+            bad_request(res, "--model pixal3d does not support multi-view conditioning (--view) or --refine-mesh yet;"
+                             " use --model trellis, or pass a single image.");
+            return nullptr;
+        }
+    }
+
+    std::string mesh_bytes;
+    if (refine) {
+        mesh_bytes = req.get_file_value("mesh").content;
+        if (mesh_bytes.size() < 4) { bad_request(res, "mesh part is empty"); return nullptr; }
+        if (req.has_file("refine_coords")) {
+            const std::string& v = req.get_file_value("refine_coords").content;
+            if      (v == "auto")    p.refine_coords = -1;
+            else if (v == "voxel")   p.refine_coords = 0;
+            else if (v == "encoder") p.refine_coords = 1;
+            else { bad_request(res, "refine_coords must be auto, encoder or voxel"); return nullptr; }
+        }
+        if (req.has_file("restore_transform")) {
+            const std::string& v = req.get_file_value("restore_transform").content;
+            if      (v == "on" || v == "1" || v == "true")   p.refine_restore = true;
+            else if (v == "off" || v == "0" || v == "false") p.refine_restore = false;
+            else { bad_request(res, "restore_transform must be on or off"); return nullptr; }
+        }
+    }
 
     try {
         job->stem = temp_stem(p.retopo ? p.retopo_workdir : std::string{});
@@ -217,10 +354,30 @@ std::shared_ptr<Job> make_job(const httplib::Request& req, httplib::Response& re
         json_error(res, 500, "failed to stage request files");
         return nullptr;
     }
-    p.image  = job->stem + ".png";
-    p.output = job->stem + ".glb";
-    job->staged.push_back(p.image);
-    job->bytes.push_back(req.get_file_value("image").content);
+    const std::string& stem = job->stem;
+    // One image and no angle fields: exactly the historical request (p.image, no views).
+    // Otherwise every image is a view: <stem>_v<i>.png at its azimuth/elevation.
+    const bool multi = images.size() > 1 || req.has_file("azimuths") || req.has_file("elevations");
+    if (multi) {
+        p.image.clear();
+        p.views.clear();
+        for (size_t i = 0; i < images.size(); ++i) {
+            job->staged.push_back(stem + "_v" + std::to_string(i) + ".png");
+            job->bytes.push_back(images[i].content);
+            p.views.push_back(trellis::ViewSpec{ job->staged.back(), angles[i].az_deg, angles[i].el_deg });
+        }
+    } else {
+        p.image = stem + ".png";
+        job->staged.push_back(p.image);
+        job->bytes.push_back(images[0].content);
+    }
+    p.output = stem + ".glb";
+    if (refine) {
+        // Detected by magic: binary glTF, else treated as OBJ text (load_mesh re-checks).
+        p.refine_mesh = stem + (mesh_bytes.compare(0, 4, "glTF") == 0 ? "_mesh.glb" : "_mesh.obj");
+        job->staged.push_back(p.refine_mesh);
+        job->bytes.push_back(std::move(mesh_bytes));
+    }
     return job;
 }
 
@@ -234,8 +391,8 @@ void execute(Job& job) {
             return;
         }
     }
-    fprintf(stderr, "[trellis-server] generate %s: %zu-byte image, seed %u, res %s, bg %s, uv %s, faces %d, atlas %s, webp %s, texture %s\n",
-            job.id.c_str(), job.bytes[0].size(), p.seed,
+    fprintf(stderr, "[trellis-server] %s %s: %zu image(s), %zu-byte first image, seed %u, res %s, bg %s, uv %s, faces %d, atlas %s, webp %s, texture %s\n",
+            job.refine ? "refine" : "generate", job.id.c_str(), job.n_images, job.bytes[0].size(), p.seed,
             p.cascade ? std::to_string(p.hr_res).c_str() : "512",
             p.birefnet < 0 ? "auto" : (p.birefnet ? "birefnet" : "threshold"), p.xatlas ? "xatlas" : "box",
             trellis::qem_face_target(p), p.tex > 0 ? std::to_string(p.tex).c_str() : "auto",
@@ -430,11 +587,11 @@ int main(int argc, char** argv) {
         res.set_content("ok", "text/plain");
     });
 
-    // /generate: synchronous -- queue the job and hold the connection until it is done.
-    // Kept for curl and older clients; a long run can outlast a browser's or proxy's
+    // /generate and /refine: synchronous -- queue the job and hold the connection until it is
+    // done. Kept for curl and older clients; a long run can outlast a browser's or proxy's
     // response timeout, which is what /jobs avoids.
-    svr.Post("/generate", [&](const httplib::Request& req, httplib::Response& res) {
-        auto job = make_job(req, res, base);
+    auto run_sync = [&](const httplib::Request& req, httplib::Response& res, bool refine) {
+        auto job = make_job(req, res, base, refine);
         if (!job) return;
         job->sync = true;
         queue.submit(job);
@@ -442,14 +599,22 @@ int main(int argc, char** argv) {
         if (job->state == Job::State::Cancelled) { json_error(res, 500, "job was cancelled"); return; }
         if (job->state != Job::State::Done) { json_error(res, 500, job->error); return; }
         res.set_content(job->glb.data(), job->glb.size(), "model/gltf-binary");
-    });
+    };
+    svr.Post("/generate", [&](const httplib::Request& req, httplib::Response& res) { run_sync(req, res, false); });
+    svr.Post("/refine",   [&](const httplib::Request& req, httplib::Response& res) { run_sync(req, res, true); });
 
-    // Asynchronous jobs: POST /jobs takes the /generate form and answers 202 {"id",...} at
-    // once; GET /jobs/{id} reports queued (with position) / running / done / error;
-    // GET /jobs/{id}/result returns the GLB; DELETE /jobs/{id} cancels a queued job or frees a
-    // finished one.
+    // Asynchronous jobs: POST /jobs takes the /generate form (plus "task"=refine with a "mesh"
+    // part for /refine) and answers 202 {"id",...} at once; GET /jobs/{id} reports
+    // queued (with position) / running / done / error; GET /jobs/{id}/result returns the GLB;
+    // DELETE /jobs/{id} cancels a queued job or frees a finished one.
     svr.Post("/jobs", [&](const httplib::Request& req, httplib::Response& res) {
-        auto job = make_job(req, res, base);
+        bool refine = false;
+        if (req.has_file("task")) {
+            const std::string& t = req.get_file_value("task").content;
+            if      (t == "refine")   refine = true;
+            else if (t != "generate") { json_error(res, 400, "task must be generate or refine"); return; }
+        }
+        auto job = make_job(req, res, base, refine);
         if (!job) return;
         queue.submit(job);
         res.status = 202;

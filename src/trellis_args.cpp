@@ -70,6 +70,66 @@ bool check_faces_compat(const TrellisParams& p, std::string& error) {
     return true;
 }
 
+bool parse_mv_stages(const std::string& value, unsigned& out, std::string& error) {
+    if (value == "all")  { out = 7; return true; }
+    if (value == "none") { out = 0; return true; }
+    unsigned bits = 0;
+    size_t b = 0;
+    while (b <= value.size()) {
+        size_t e = value.find(',', b);
+        if (e == std::string::npos) e = value.size();
+        const std::string t = value.substr(b, e - b);
+        if      (t == "ss")    bits |= 1u;
+        else if (t == "shape") bits |= 2u;
+        else if (t == "tex")   bits |= 4u;
+        else { error = "mv-stages expects a comma list of ss,shape,tex (or all / none), got '" + value + "'"; return false; }
+        b = e + 1;
+    }
+    out = bits;
+    return true;
+}
+
+bool blend_params_of(const TrellisParams& p, BlendParams& out, std::string& error) {
+    BlendParams bp;
+    if (!(p.blend_temp > 0.0f) || !std::isfinite(p.blend_temp)) {
+        error = "blend-temp must be a positive number";
+        return false;
+    }
+    if (!std::isfinite(p.yaw_offset)) { error = "yaw-offset must be finite"; return false; }
+    if (!parse_front_axis(p.front_axis, bp.front)) {
+        error = "front-axis must be one of -y, +y, +x, -x, ref-z, ref-x (got '" + p.front_axis + "')";
+        return false;
+    }
+    bp.temperature = p.blend_temp;
+    bp.yaw_offset = p.yaw_offset;
+    out = bp;
+    return true;
+}
+
+bool resolve_views(const TrellisParams& p, std::vector<ViewSpec>& out, std::string& error) {
+    std::vector<ViewSpec> v;
+    if (!p.image.empty()) v.push_back(ViewSpec{ p.image, 0.0f, 0.0f });
+    for (const ViewSpec& s : p.views) v.push_back(s);
+    if (v.empty()) {
+        error = p.refine_mesh.empty() ? "no input image (give <image.png>, --image or --view)"
+                                      : "--refine-mesh needs at least one view image (--image or --view)";
+        return false;
+    }
+    if ((int)v.size() > kMaxViews) {
+        error = "at most " + std::to_string(kMaxViews) + " views are supported (got " + std::to_string(v.size()) + ")";
+        return false;
+    }
+    BlendParams bp;
+    if (!blend_params_of(p, bp, error)) return false;
+    if (p.family == ModelFamily::Pixal3D && (v.size() > 1 || !p.refine_mesh.empty())) {
+        error = "--model pixal3d does not support multi-view conditioning (--view) or --refine-mesh yet;"
+                " use --model trellis, or pass a single image.";
+        return false;
+    }
+    out = std::move(v);
+    return true;
+}
+
 const char* model_family_name(ModelFamily f) {
     return f == ModelFamily::Pixal3D ? "pixal3d" : "trellis";
 }
@@ -89,6 +149,30 @@ void print_usage(const char* argv0, bool server) {
         "\n"
         "  -i, --image PATH        input image                  (image->3D)\n"
         "  -o, --output PATH       output .glb                  (default model.glb)\n"
+        "      --view PATH[:AZ[:EL]]  add a view of the same object (repeatable; multi-view\n"
+        "                          conditioning). AZ/EL in degrees: 0 front, 90 camera on the\n"
+        "                          object's right as seen from the front (viewer +X), 180 back,\n"
+        "                          270 left; EL +90 top. AZ may be a name: front|back|left|\n"
+        "                          right|top|bottom. The positional/--image input is view 0\n"
+        "                          (front). Up to 12 views; each costs one flow forward per step.\n"
+        "                            trellis-cli front.png out.glb --view back.png:180\n"
+        "                            trellis-cli --view f.png:0 --view r.png:90 --view b.png:180\n"
+        "                                        --view l.png:270 -o out.glb\n"
+        "      --blend-temp F      multi-view blend sharpness (softmax temperature, default 2.0)\n"
+        "      --front-axis NAME   where the object's front lies on the latent grid: -y (default,\n"
+        "                          TRELLIS canonical) | +y | +x | -x | ref-z | ref-x (the last two\n"
+        "                          reproduce ComfyUI-Trellis2's front_axis 'z' / 'x' exactly)\n"
+        "      --yaw-offset DEG    added to every view's azimuth (default 0)\n"
+        "      --mv-stages LIST    stages that blend views: ss,shape,tex | all | none (default all;\n"
+        "                          the others use the first view only)\n"
+        "      --refine-mesh PATH  re-generate an existing mesh (.glb/.gltf/.obj) from the view(s):\n"
+        "                          its voxels fix the shape SLAT coordinates; the sparse-structure\n"
+        "                          and LR stages are skipped\n"
+        "      --refine-coords M   auto (default) | encoder | voxel: where the refine coordinates\n"
+        "                          come from (encoder needs shape_enc.gguf; auto falls back to voxel)\n"
+        "      --refine-restore-transform on|off\n"
+        "                          map the refined mesh back to the input's position and scale\n"
+        "                          (default on)\n"
         "      --copyright TEXT    glTF asset.copyright metadata\n"
         "  -m, --models DIR        GGUF model directory\n"
         "      --model FAMILY      trellis (default) | pixal3d — which flow weights the model\n"
@@ -207,6 +291,35 @@ bool parse_args(int argc, char** argv, TrellisParams& p) {
         if      (a == "-h" || a == "--help")    { p.help = true; return false; }
         else if (a == "-i" || a == "--image")   { const char* v = need(a.c_str()); if (!v) return false; p.image = v; }
         else if (a == "-o" || a == "--output")  { const char* v = need(a.c_str()); if (!v) return false; p.output = v; }
+        else if (a == "--view")                 { const char* v = need(a.c_str()); if (!v) return false;
+                                                  ViewSpec vs; std::string error;
+                                                  if (!parse_view_spec(v, vs, error)) { fprintf(stderr, "[trellis] %s\n", error.c_str()); return false; }
+                                                  p.views.push_back(vs); }
+        else if (a == "--blend-temp")           { const char* v = need(a.c_str()); if (!v) return false;
+                                                  char* end = nullptr; const float f = std::strtof(v, &end);
+                                                  if (end == v || *end || !std::isfinite(f) || f <= 0) { fprintf(stderr, "[trellis] --blend-temp must be a positive number\n"); return false; }
+                                                  p.blend_temp = f; }
+        else if (a == "--front-axis")           { const char* v = need(a.c_str()); if (!v) return false;
+                                                  FrontAxis fa;
+                                                  if (!parse_front_axis(v, fa)) { fprintf(stderr, "[trellis] --front-axis must be one of -y, +y, +x, -x, ref-z, ref-x\n"); return false; }
+                                                  p.front_axis = v; }
+        else if (a == "--yaw-offset")           { const char* v = need(a.c_str()); if (!v) return false;
+                                                  char* end = nullptr; const float f = std::strtof(v, &end);
+                                                  if (end == v || *end || !std::isfinite(f)) { fprintf(stderr, "[trellis] --yaw-offset must be a number of degrees\n"); return false; }
+                                                  p.yaw_offset = f; }
+        else if (a == "--mv-stages")            { const char* v = need(a.c_str()); if (!v) return false;
+                                                  std::string error;
+                                                  if (!parse_mv_stages(v, p.mv_stages, error)) { fprintf(stderr, "[trellis] %s\n", error.c_str()); return false; } }
+        else if (a == "--refine-mesh")          { const char* v = need(a.c_str()); if (!v) return false; p.refine_mesh = v; }
+        else if (a == "--refine-coords")        { const char* v = need(a.c_str()); if (!v) return false;
+                                                  if      (std::strcmp(v, "auto") == 0)    p.refine_coords = -1;
+                                                  else if (std::strcmp(v, "voxel") == 0)   p.refine_coords = 0;
+                                                  else if (std::strcmp(v, "encoder") == 0) p.refine_coords = 1;
+                                                  else { fprintf(stderr, "[trellis] --refine-coords must be auto, encoder or voxel\n"); return false; } }
+        else if (a == "--refine-restore-transform") { const char* v = need(a.c_str()); if (!v) return false;
+                                                  if      (std::strcmp(v,"on")==0  || std::strcmp(v,"1")==0 || std::strcmp(v,"true")==0)  p.refine_restore = true;
+                                                  else if (std::strcmp(v,"off")==0 || std::strcmp(v,"0")==0 || std::strcmp(v,"false")==0) p.refine_restore = false;
+                                                  else { fprintf(stderr, "[trellis] --refine-restore-transform must be on or off\n"); return false; } }
         else if (a == "--copyright")            { const char* v = need(a.c_str()); if (!v) return false; p.copyright = v; }
         else if (a == "-m" || a == "--models")  { const char* v = need(a.c_str()); if (!v) return false; p.models = v; }
         else if (a == "--model")                { const char* v = need(a.c_str()); if (!v) return false;

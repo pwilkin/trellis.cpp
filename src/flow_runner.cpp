@@ -190,17 +190,76 @@ DitRunner* make_sparse_runner(const Model& m, const DiTParams& p,
     return new DitRunner(m, p, (int)coords.size(), n_cond, rcos, rsin);
 }
 
-std::vector<float> sample_flow(const FlowFwd& fwd, std::vector<float> sample,
-                               const FlowCond& cond, const FlowCond& neg_cond, const SamplerParams& sp,
-                               std::vector<std::vector<float>>* trace) {
+// One guided velocity: guidance interval already folded into `gs`, then CFG and CFG-rescale,
+// exactly as the reference ClassifierFreeGuidanceSamplerMixin. `neg_cached` (when non-null) is
+// the negative branch's velocity at this (x_t, t), reused instead of running a forward;
+// `neg_out` (when non-null) receives the negative velocity this call computed or reused.
+// The arithmetic order is the historical sample_flow's -- the N=1 guarantee depends on it.
+static void guided_velocity(const FlowFwd& fwd, const std::vector<float>& sample, float t, float gs,
+                            const FlowCond& cond, const FlowCond& neg_cond, const SamplerParams& sp,
+                            const std::vector<float>* neg_cached, std::vector<float>& pred,
+                            std::vector<float>* neg_out, int& n_fwd) {
+    static const bool no_fix = std::getenv("TRELLIS_NOFIX") != nullptr;
     const float sm = sp.sigma_min;
+    const size_t Nst = sample.size();
+    const float tscaled = 1000.0f * t;
+    if (gs == 1.0f) {
+        pred = fwd(sample, tscaled, cond);
+        ++n_fwd;
+        return;
+    }
+    if (gs == 0.0f) {
+        if (neg_cached) pred = *neg_cached;
+        else { pred = fwd(sample, tscaled, neg_cond); ++n_fwd; }
+        if (neg_out && neg_out != neg_cached) *neg_out = pred;
+        return;
+    }
+    std::vector<float> pos = fwd(sample, tscaled, cond);
+    ++n_fwd;
+    std::vector<float> neg_local;
+    const std::vector<float>* negp = neg_cached;
+    if (!negp) { neg_local = fwd(sample, tscaled, neg_cond); ++n_fwd; negp = &neg_local; }
+    const std::vector<float>& neg = *negp;
+    pred.resize(Nst);
+    for (size_t k = 0; k < Nst; ++k) pred[k] = gs * pos[k] + (1 - gs) * neg[k];
+    if (sp.guidance_rescale > 0.0f) {
+        const float a = 1 - sm, b = sm + (1 - sm) * t;
+        double mp = 0, mc = 0;
+        std::vector<float> x0p(Nst), x0c(Nst);
+        for (size_t k = 0; k < Nst; ++k) { x0p[k] = a*sample[k] - b*pos[k]; x0c[k] = a*sample[k] - b*pred[k]; mp += x0p[k]; mc += x0c[k]; }
+        mp /= Nst; mc /= Nst;
+        double vp = 0, vc = 0;
+        for (size_t k = 0; k < Nst; ++k) { vp += (x0p[k]-mp)*(x0p[k]-mp); vc += (x0c[k]-mc)*(x0c[k]-mc); }
+        float ratio = vc > 0 ? (float)(std::sqrt(vp/(Nst-1)) / std::sqrt(vc/(Nst-1))) : 1.0f;
+        // OOD inputs (e.g. a thin figure at HR) can make vc tiny -> ratio explodes -> the
+        // rescaled velocity blows the latent past representable range over the 12 steps ->
+        // all-NaN SLAT. Clamp ratio to a sane band: it sits at ~1.0 for in-distribution
+        // props (a no-op there), and only bites on the pathological tail. (TRELLIS_NOFIX=1
+        // restores the raw behaviour for A/B.)
+        if (!no_fix) { if (!std::isfinite(ratio)) ratio = 1.0f; ratio = fminf(fmaxf(ratio, 0.2f), 5.0f); }
+        float gr = sp.guidance_rescale;
+        for (size_t k = 0; k < Nst; ++k) { float x0r = x0c[k]*ratio; float x0 = gr*x0r + (1-gr)*x0c[k]; pred[k] = (a*sample[k] - x0) / b; }
+    }
+    if (neg_out && neg_out != neg_cached) {
+        if (negp == &neg_local) *neg_out = std::move(neg_local);
+        else *neg_out = neg;
+    }
+}
+
+// The Euler loop shared by the single- and multi-view samplers: timestep schedule, guidance
+// interval, safety net, progress, trace. `velocity` fills `pred` for one step.
+using StepVelocity = std::function<void(const std::vector<float>& sample, float t, float gs,
+                                        std::vector<float>& pred, int& n_fwd)>;
+static std::vector<float> euler_loop(std::vector<float> sample, const SamplerParams& sp,
+                                     std::vector<std::vector<float>>* trace, int n_views,
+                                     const StepVelocity& velocity) {
     const size_t Nst = sample.size();
     std::vector<float> ts(sp.steps + 1);
     for (int i = 0; i <= sp.steps; ++i) {
         float t = 1.0f - (float)i / sp.steps;
         ts[i] = sp.rescale_t * t / (1.0f + (sp.rescale_t - 1.0f) * t);
     }
-    std::vector<float> pos, neg, pred(Nst);
+    std::vector<float> pred(Nst);
     static const bool dbg_step = std::getenv("TRELLIS_DBG_STEP") != nullptr;
     static const bool no_fix   = std::getenv("TRELLIS_NOFIX") != nullptr;  // robustness guards ON by default
     const auto tflow0 = std::chrono::steady_clock::now();
@@ -230,37 +289,7 @@ std::vector<float> sample_flow(const FlowFwd& fwd, std::vector<float> sample,
     for (int i = 0; i < sp.steps; ++i) {
         const float t = ts[i], tprev = ts[i + 1];
         const float gs = (sp.gi0 <= t && t <= sp.gi1) ? sp.guidance_strength : 1.0f;
-        const float tscaled = 1000.0f * t;
-        if (gs == 1.0f) {
-            pred = fwd(sample, tscaled, cond);
-            ++n_fwd;
-        } else if (gs == 0.0f) {
-            pred = fwd(sample, tscaled, neg_cond);
-            ++n_fwd;
-        } else {
-            pos = fwd(sample, tscaled, cond);
-            neg = fwd(sample, tscaled, neg_cond);
-            n_fwd += 2;
-            for (size_t k = 0; k < Nst; ++k) pred[k] = gs * pos[k] + (1 - gs) * neg[k];
-            if (sp.guidance_rescale > 0.0f) {
-                const float a = 1 - sm, b = sm + (1 - sm) * t;
-                double mp = 0, mc = 0;
-                std::vector<float> x0p(Nst), x0c(Nst);
-                for (size_t k = 0; k < Nst; ++k) { x0p[k] = a*sample[k] - b*pos[k]; x0c[k] = a*sample[k] - b*pred[k]; mp += x0p[k]; mc += x0c[k]; }
-                mp /= Nst; mc /= Nst;
-                double vp = 0, vc = 0;
-                for (size_t k = 0; k < Nst; ++k) { vp += (x0p[k]-mp)*(x0p[k]-mp); vc += (x0c[k]-mc)*(x0c[k]-mc); }
-                float ratio = vc > 0 ? (float)(std::sqrt(vp/(Nst-1)) / std::sqrt(vc/(Nst-1))) : 1.0f;
-                // OOD inputs (e.g. a thin figure at HR) can make vc tiny -> ratio explodes -> the
-                // rescaled velocity blows the latent past representable range over the 12 steps ->
-                // all-NaN SLAT. Clamp ratio to a sane band: it sits at ~1.0 for in-distribution
-                // props (a no-op there), and only bites on the pathological tail. (TRELLIS_NOFIX=1
-                // restores the raw behaviour for A/B.)
-                if (!no_fix) { if (!std::isfinite(ratio)) ratio = 1.0f; ratio = fminf(fmaxf(ratio, 0.2f), 5.0f); }
-                float gr = sp.guidance_rescale;
-                for (size_t k = 0; k < Nst; ++k) { float x0r = x0c[k]*ratio; float x0 = gr*x0r + (1-gr)*x0c[k]; pred[k] = (a*sample[k] - x0) / b; }
-            }
-        }
+        velocity(sample, t, gs, pred, n_fwd);
         // Safety net: never integrate a non-finite velocity (one poisoned tap would spread to the
         // whole latent on the next attention). A no-op when everything is finite.
         if (!no_fix) for (size_t k = 0; k < Nst; ++k) if (!std::isfinite(pred[k])) pred[k] = 0.0f;
@@ -272,10 +301,57 @@ std::vector<float> sample_flow(const FlowFwd& fwd, std::vector<float> sample,
         if (trace) trace->push_back(sample);
     }
     if (tty) printf("\n");
-    printf("      [flow] %d steps, %d forwards, %.1fs\n", sp.steps, n_fwd,
-           std::chrono::duration<double>(std::chrono::steady_clock::now() - tflow0).count());
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - tflow0).count();
+    if (n_views > 1) printf("      [flow] %d steps, %d forwards, %d views, %.1fs\n", sp.steps, n_fwd, n_views, secs);
+    else             printf("      [flow] %d steps, %d forwards, %.1fs\n", sp.steps, n_fwd, secs);
     fflush(stdout);
     return sample;
+}
+
+std::vector<float> sample_flow(const FlowFwd& fwd, std::vector<float> sample,
+                               const FlowCond& cond, const FlowCond& neg_cond, const SamplerParams& sp,
+                               std::vector<std::vector<float>>* trace) {
+    return euler_loop(std::move(sample), sp, trace, 1,
+        [&](const std::vector<float>& x, float t, float gs, std::vector<float>& pred, int& n_fwd) {
+            guided_velocity(fwd, x, t, gs, cond, neg_cond, sp, nullptr, pred, nullptr, n_fwd);
+        });
+}
+
+std::vector<float> sample_flow_mv(const FlowFwd& fwd, std::vector<float> sample,
+                                  const MultiViewCond& mv, const SamplerParams& sp,
+                                  std::vector<std::vector<float>>* trace) {
+    const int V = (int)mv.cond.size();
+    if (V <= 0) throw std::runtime_error("sample_flow_mv: no views");
+    // N=1 is the single-view sampler, bit for bit: same calls, same arithmetic, same log line.
+    if (V == 1) return sample_flow(fwd, std::move(sample), mv.cond[0], mv.neg, sp, trace);
+    if (!mv.weights || mv.n_tok <= 0 || sample.size() % (size_t)mv.n_tok != 0)
+        throw std::runtime_error("sample_flow_mv: weights / token count do not match the sample");
+    static const bool no_fix = std::getenv("TRELLIS_NOFIX") != nullptr;
+    const size_t Nst = sample.size();
+    const size_t N = (size_t)mv.n_tok;
+    const size_t C = Nst / N;
+    std::vector<float> view_pred, neg;
+    return euler_loop(std::move(sample), sp, trace, V,
+        [&](const std::vector<float>& x, float t, float gs, std::vector<float>& acc, int& n_fwd) {
+            // Every view's negative is the same zero tensor at the same (x_t, t): one forward
+            // serves all of them, so a guided step costs V+1 forwards instead of 2V.
+            const bool need_neg = gs != 1.0f;
+            if (need_neg) { neg = fwd(x, 1000.0f * t, mv.neg); ++n_fwd; }
+            acc.assign(Nst, 0.0f);
+            for (int v = 0; v < V; ++v) {
+                guided_velocity(fwd, x, t, gs, mv.cond[(size_t)v], mv.neg, sp,
+                                need_neg ? &neg : nullptr, view_pred, nullptr, n_fwd);
+                // Per-view safety net, so one bad view cannot poison the blend.
+                if (!no_fix) for (float& p : view_pred) if (!std::isfinite(p)) p = 0.0f;
+                const float* w = mv.weights + (size_t)v * N;
+                for (size_t n = 0; n < N; ++n) {
+                    const float wn = w[n];
+                    float* a = acc.data() + n * C;
+                    const float* p = view_pred.data() + n * C;
+                    for (size_t c = 0; c < C; ++c) a[c] += p[c] * wn;
+                }
+            }
+        });
 }
 
 } // namespace trellis

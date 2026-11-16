@@ -7,6 +7,7 @@
 #include "ggml-alloc.h"
 
 #include <algorithm>
+#include <functional>
 #include <cmath>
 #include <cstdlib>
 #include <unordered_map>
@@ -288,6 +289,189 @@ std::vector<float> sparse_convnext_streamed(const Model& m, const std::string& p
         std::copy(hv.begin(), hv.end(), out.begin() + (size_t)C * r0);
     }
     return out;
+}
+
+// ---------------------------------------------------------------------------------------
+// Encoder side (shape SLAT encoder, docs/spec/31-mesh-refine.md).
+namespace {
+struct CompactNbr {
+    std::vector<int32_t> table;       // tap-major local indices, sentinel = globals.size()
+    std::vector<int32_t> globals;     // local column -> source column in the full host table
+};
+CompactNbr compact_nbr(const std::vector<int32_t>& full, int full_n, int64_t r0, int nr, int sentinel) {
+    CompactNbr out;
+    out.table.resize((size_t)27 * nr);
+    std::unordered_map<int32_t, int32_t> remap;
+    remap.reserve((size_t)nr * 2 + 1);
+    for (int t = 0; t < 27; ++t)
+        for (int j = 0; j < nr; ++j) {
+            const int32_t g = full[(size_t)t * full_n + (size_t)r0 + j];
+            if (g == sentinel) { out.table[(size_t)t * nr + j] = -1; continue; }
+            auto it = remap.find(g);
+            if (it == remap.end()) {
+                const int32_t li = (int32_t)out.globals.size();
+                out.globals.push_back(g); remap.emplace(g, li);
+                out.table[(size_t)t * nr + j] = li;
+            } else out.table[(size_t)t * nr + j] = it->second;
+        }
+    const int32_t ls = (int32_t)out.globals.size();
+    for (int32_t& x : out.table) if (x < 0) x = ls;
+    return out;
+}
+std::vector<float> gather_cols(const float* full, int C, const std::vector<int32_t>& globals) {
+    std::vector<float> local((size_t)C * (globals.size() + 1), 0.0f);
+    for (size_t li = 0; li < globals.size(); ++li)
+        std::copy_n(full + (size_t)C * (size_t)globals[li], C, local.data() + (size_t)C * li);
+    return local;
+}
+constexpr int64_t kEncStreamVoxels = 65536;
+int64_t enc_chunk(int64_t per_vox_bytes, int64_t N) {
+    int64_t budget = 256ll * 1024 * 1024;
+    if (const char* e = getenv("TRELLIS_ENC_CHUNK_MB")) { const int64_t mb = atoll(e); if (mb > 0) budget = mb * 1024 * 1024; }
+    int64_t ch = std::max<int64_t>(1, budget / std::max<int64_t>(1, per_vox_bytes));
+    return std::min<int64_t>(std::min<int64_t>(ch, kEncStreamVoxels), std::max<int64_t>(1, N));
+}
+// Streamed submanifold conv over a host table `in` [Ci*N] -> [Co*N]. `post` (optional) is applied
+// to each output chunk inside the same graph.
+std::vector<float> submconv_streamed(const Model& m, const std::string& prefix, const float* in, int Ci,
+                                     const std::vector<int32_t>& nbr, int N, int Co,
+                                     const std::function<T*(ggml_context*, T*)>& post = nullptr) {
+    std::vector<float> out((size_t)Co * N);
+    const int64_t chunk = enc_chunk(4ll * std::max(Ci, Co) * 4, N);
+    for (int64_t r0 = 0; r0 < N; r0 += chunk) {
+        const int nr = (int)std::min<int64_t>(chunk, N - r0);
+        CompactNbr cn = compact_nbr(nbr, N, r0, nr, N);
+        std::vector<float> local = gather_cols(in, Ci, cn.globals);
+        GraphRun gr(m);
+        ggml_context* c = gr.c;
+        T* gh = ggml_new_tensor_2d(c, GGML_TYPE_F32, Ci, (int64_t)cn.globals.size() + 1); ggml_set_input(gh);
+        T* gn = ggml_new_tensor_2d(c, GGML_TYPE_I32, nr, 27); ggml_set_input(gn);
+        T* W = w32(c, m.get(prefix + ".weight"));
+        T* o = submconv_range(c, m, prefix, gh, W, gn, nr, 0, nr);
+        if (post) o = post(c, o);
+        std::vector<float> ov = gr.run(o, { {gh, local.data()}, {gn, cn.table.data()} });
+        std::copy(ov.begin(), ov.end(), out.begin() + (size_t)Co * r0);
+    }
+    return out;
+}
+}  // namespace
+
+std::vector<float> sparse_linear_streamed(const Model& m, const std::string& prefix,
+                                          const std::vector<float>& feats_in, int Cin, int N) {
+    T* Wt = m.get(prefix + ".weight");     // ggml ne [Cin, Cout]
+    const int Cout = (int)Wt->ne[1];
+    if ((int)Wt->ne[0] != Cin || feats_in.size() != (size_t)Cin * N)
+        throw std::runtime_error("sparse_linear_streamed: shape mismatch in " + prefix);
+    std::vector<float> out((size_t)Cout * N);
+    const int64_t chunk = enc_chunk(4ll * (Cin + Cout), N);
+    for (int64_t r0 = 0; r0 < N; r0 += chunk) {
+        const int nr = (int)std::min<int64_t>(chunk, N - r0);
+        GraphRun gr(m);
+        ggml_context* c = gr.c;
+        T* gf = ggml_new_tensor_2d(c, GGML_TYPE_F32, Cin, nr); ggml_set_input(gf);
+        T* o = ggml_add(c, ggml_mul_mat(c, m.get(prefix + ".weight"), gf), m.get(prefix + ".bias"));
+        std::vector<float> ov = gr.run(o, { {gf, feats_in.data() + (size_t)Cin * r0} });
+        std::copy(ov.begin(), ov.end(), out.begin() + (size_t)Cout * r0);
+    }
+    return out;
+}
+
+std::vector<float> sparse_norm_streamed(const Model& m, const std::vector<float>& feats_in, int C, int N, float eps) {
+    std::vector<float> out((size_t)C * N);
+    const int64_t chunk = enc_chunk(4ll * C * 2, N);
+    for (int64_t r0 = 0; r0 < N; r0 += chunk) {
+        const int nr = (int)std::min<int64_t>(chunk, N - r0);
+        GraphRun gr(m);
+        T* gf = ggml_new_tensor_2d(gr.c, GGML_TYPE_F32, C, nr); ggml_set_input(gf);
+        std::vector<float> ov = gr.run(ggml_norm(gr.c, gf, eps), { {gf, feats_in.data() + (size_t)C * r0} });
+        std::copy(ov.begin(), ov.end(), out.begin() + (size_t)C * r0);
+    }
+    return out;
+}
+
+S2CResult sparse_s2c(const Model& m, const std::string& prefix,
+                     const std::vector<float>& feats_in, int Cin,
+                     const std::vector<std::array<int,3>>& coords, int Cout) {
+    const int N = (int)coords.size();
+    if (N == 0) throw std::runtime_error("s2c: empty input in " + prefix);
+    if (Cin <= 0 || Cout % 8 != 0 || (8 * Cin) % Cout != 0 || feats_in.size() != (size_t)Cin * N)
+        throw std::runtime_error("s2c: invalid shapes in " + prefix);
+    const int C1 = Cout / 8;               // conv1 width at the fine level
+    const int G = 8 * Cin / Cout;          // skip: mean over groups of G packed channels
+
+    // ---- parents: coord/2, lexicographic (x,y,z); child slot lx + 2ly + 4lz ----
+    std::vector<uint64_t> keyed((size_t)N);
+    auto pkey = [](int x, int y, int z) { return ((uint64_t)(uint32_t)x << 42) | ((uint64_t)(uint32_t)y << 21) | (uint64_t)(uint32_t)z; };
+    for (int i = 0; i < N; ++i) keyed[(size_t)i] = pkey(coords[i][0] >> 1, coords[i][1] >> 1, coords[i][2] >> 1);
+    std::vector<uint64_t> uniq = keyed;
+    std::sort(uniq.begin(), uniq.end());
+    uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
+    const int P = (int)uniq.size();
+    std::vector<std::array<int,3>> pc((size_t)P);
+    for (int p = 0; p < P; ++p) {
+        const uint64_t k = uniq[(size_t)p];
+        pc[(size_t)p] = { (int)(k >> 42), (int)((k >> 21) & 0x1fffff), (int)(k & 0x1fffff) };
+    }
+    std::vector<int32_t> parent((size_t)N);
+    std::vector<uint8_t> slot((size_t)N);
+    for (int i = 0; i < N; ++i) {
+        parent[(size_t)i] = (int32_t)(std::lower_bound(uniq.begin(), uniq.end(), keyed[(size_t)i]) - uniq.begin());
+        slot[(size_t)i] = (uint8_t)((coords[i][0] & 1) | ((coords[i][1] & 1) << 1) | ((coords[i][2] & 1) << 2));
+    }
+    std::vector<uint64_t>().swap(keyed); std::vector<uint64_t>().swap(uniq);
+
+    // ---- norm1 (affine) + SiLU, voxel-local ----
+    std::vector<float> hnorm((size_t)Cin * N);
+    {
+        const int64_t chunk = enc_chunk(4ll * Cin * 2, N);
+        for (int64_t r0 = 0; r0 < N; r0 += chunk) {
+            const int nr = (int)std::min<int64_t>(chunk, N - r0);
+            GraphRun gr(m);
+            ggml_context* c = gr.c;
+            T* gf = ggml_new_tensor_2d(c, GGML_TYPE_F32, Cin, nr); ggml_set_input(gf);
+            T* h = ggml_norm(c, gf, 1e-6f);
+            h = ggml_add(c, ggml_mul(c, h, m.get(prefix + ".norm1.weight")), m.get(prefix + ".norm1.bias"));
+            h = ggml_silu(c, h);
+            std::vector<float> hv = gr.run(h, { {gf, feats_in.data() + (size_t)Cin * r0} });
+            std::copy(hv.begin(), hv.end(), hnorm.begin() + (size_t)Cin * r0);
+        }
+    }
+    // ---- conv1 at the fine level ----
+    std::vector<float> h1;
+    {
+        std::vector<int32_t> nbr = build_neighbor_table(coords);
+        h1 = submconv_streamed(m, prefix + ".conv1", hnorm.data(), Cin, nbr, N, C1);
+    }
+    std::vector<float>().swap(hnorm);
+    // ---- S2C of h (and the skip of x) on the host ----
+    std::vector<float> h2((size_t)Cout * P, 0.0f), skip((size_t)Cout * P, 0.0f);
+    for (int i = 0; i < N; ++i) {
+        const size_t p = (size_t)parent[(size_t)i];
+        const int s = slot[(size_t)i];
+        std::copy_n(h1.data() + (size_t)C1 * i, C1, h2.data() + p * Cout + (size_t)s * C1);
+        // packed x: channel s*Cin + c; skip output o averages packed channels [o*G, (o+1)*G)
+        const float* xi = feats_in.data() + (size_t)Cin * i;
+        for (int c = 0; c < Cin; ++c) skip[p * Cout + (size_t)((s * Cin + c) / G)] += xi[c];
+    }
+    for (float& v : skip) v /= (float)G;
+    std::vector<float>().swap(h1);
+    // ---- norm2 (no affine) + SiLU, then conv2 at the coarse level, + skip ----
+    std::vector<float> h2n((size_t)Cout * P);
+    {
+        const int64_t chunk = enc_chunk(4ll * Cout * 2, P);
+        for (int64_t r0 = 0; r0 < P; r0 += chunk) {
+            const int nr = (int)std::min<int64_t>(chunk, P - r0);
+            GraphRun gr(m);
+            T* gf = ggml_new_tensor_2d(gr.c, GGML_TYPE_F32, Cout, nr); ggml_set_input(gf);
+            std::vector<float> hv = gr.run(ggml_silu(gr.c, ggml_norm(gr.c, gf, 1e-6f)), { {gf, h2.data() + (size_t)Cout * r0} });
+            std::copy(hv.begin(), hv.end(), h2n.begin() + (size_t)Cout * r0);
+        }
+    }
+    std::vector<float>().swap(h2);
+    std::vector<int32_t> pnbr = build_neighbor_table(pc);
+    std::vector<float> out = submconv_streamed(m, prefix + ".conv2", h2n.data(), Cout, pnbr, P, Cout);
+    for (size_t k = 0; k < out.size(); ++k) out[k] += skip[k];
+    return { std::move(out), std::move(pc), Cout };
 }
 
 C2SResult sparse_c2s(const Model& m, const std::string& prefix,
