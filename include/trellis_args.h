@@ -104,6 +104,10 @@ struct TrellisParams {
                                 // i32 faces[F*3]; i32 coords[Mv*3]; f32 pbr6[Mv*6];
                                 // same layout as the TRELLIS_DUMP_POST debug env)
     bool bg_only = false;       // background removal only: write the cutout and skip the rest
+    std::string save_coarse;    // write the coarse stage (structure + res-32 shape latent) here
+    std::string load_coarse;    // start from a coarse stage written by --save-coarse: skips the
+                                //   structure flow and the res-32 shape flow. Ignored, with a
+                                //   note, unless image, seed, steps, guidance and models match
 
     int  steps    = 0;          // flow sampler steps; 0 = model default (12). Lowering this
                                 //   trades output quality for turnaround and is meant for
