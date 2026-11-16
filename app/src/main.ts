@@ -5,7 +5,7 @@ import { renderSettings } from "./settings";
 import { all, clear as clearStore, del as removeRecord, get as getRecord, isEphemeral, newId, put } from "./store";
 import { isTauri, listen, saveBytes, saveToOutputDir } from "./tauri";
 import { Viewer } from "./viewer";
-import { DEFAULT_PARAMS, type GenParams, type GenRecord } from "./types";
+import { DEFAULT_PARAMS, MAX_VIEWS, type ExtraView, type GenParams, type GenRecord } from "./types";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -28,6 +28,13 @@ const backendBadge = $("backend-badge");
 const serverDot = $("server-dot");
 const serverLabel = $("server-label");
 const setupBanner = $("setup-banner");
+const frontTag = $("front-tag");
+const viewsEl = $("views");
+const viewsList = $("views-list");
+const addViewBtn = $<HTMLButtonElement>("add-view");
+const viewInput = $<HTMLInputElement>("view-input");
+const clearViewsBtn = $("clear-views");
+const mvAdv = $("mv-adv");
 
 // ---- state ----
 const viewer = new Viewer($("viewer-mount"));
@@ -45,6 +52,11 @@ let abort: AbortController | null = null;
 let elapsedTimer: number | null = null;
 let galleryUrls: string[] = [];
 let warnedEphemeral = false;
+let extraViews: ExtraView[] = [];
+// Camera direction of the main image (sent only with extra views).
+let mainAz = 0;
+let mainEl = 0;
+let viewUrls: string[] = [];
 
 // ---- controls -> params ----
 function readParams(): GenParams {
@@ -56,7 +68,16 @@ function readParams(): GenParams {
     bgRemoval: ($("ctl-bg") as HTMLSelectElement).value as GenParams["bgRemoval"],
     uv: ($("ctl-uv") as HTMLSelectElement).value as GenParams["uv"],
     texture: ($("ctl-tex") as HTMLSelectElement).value !== "off",
+    blendTemp: readBlendTemp(),
+    frontAxis: ($("ctl-front") as HTMLSelectElement).value as GenParams["frontAxis"],
+    mainAz,
+    mainEl,
   };
+}
+
+function readBlendTemp(): number {
+  const t = parseFloat(($("ctl-blend") as HTMLInputElement).value);
+  return isFinite(t) && t > 0 ? t : DEFAULT_PARAMS.blendTemp;
 }
 
 function applyParams(p: GenParams): void {
@@ -66,6 +87,11 @@ function applyParams(p: GenParams): void {
   ($("ctl-uv") as HTMLSelectElement).value = p.uv;
   // records saved before this option existed have no field: treat as textured
   ($("ctl-tex") as HTMLSelectElement).value = p.texture === false ? "off" : "on";
+  // records saved before multi-view existed have neither field
+  ($("ctl-blend") as HTMLInputElement).value = String(p.blendTemp ?? DEFAULT_PARAMS.blendTemp);
+  ($("ctl-front") as HTMLSelectElement).value = p.frontAxis ?? DEFAULT_PARAMS.frontAxis;
+  mainAz = p.mainAz ?? 0;
+  mainEl = p.mainEl ?? 0;
 }
 
 // ---- toasts ----
@@ -84,16 +110,185 @@ function setInput(blob: Blob, name: string): void {
   inputPreview.src = URL.createObjectURL(blob);
   inputPreview.classList.remove("hidden");
   dropHint.classList.add("hidden");
+  renderViews(); // the main-image row shows the new thumbnail
   updateGenerateEnabled();
 }
+
+// ---- extra views (multi-view conditioning) ----
+// The main image is always the front view (azimuth 0, elevation 0); each extra
+// view is another photo of the same object with its own camera direction.
+const AZIMUTHS: [number, string][] = [
+  [0, "front"], [45, "front-right"], [90, "right"], [135, "back-right"],
+  [180, "back"], [225, "back-left"], [270, "left"], [315, "front-left"],
+];
+
+/** Guess a view's direction from its file name, else take the next unused one. */
+function guessDirection(name: string): { az: number; el: number } {
+  const n = name.toLowerCase();
+  if (/\btop\b|_top|top_/.test(n)) return { az: 0, el: 90 };
+  if (/bottom/.test(n)) return { az: 0, el: -90 };
+  if (/back/.test(n)) return { az: 180, el: 0 };
+  if (/left/.test(n)) return { az: 270, el: 0 };
+  if (/right/.test(n)) return { az: 90, el: 0 };
+  const used = new Set([mainAz, ...extraViews.map((v) => v.az)]);
+  const az = [180, 90, 270, 45, 135, 225, 315].find((a) => !used.has(a)) ?? 180;
+  return { az, el: 0 };
+}
+
+function addViews(files: File[]): void {
+  for (const f of files) {
+    if (!isImage(f)) {
+      toast(`"${f.name}" isn't an image — skipped.`, "err");
+      continue;
+    }
+    if (extraViews.length + 1 >= MAX_VIEWS) {
+      toast(`At most ${MAX_VIEWS} images (front + ${MAX_VIEWS - 1} views) per generation.`, "err");
+      break;
+    }
+    extraViews.push({ image: f, name: f.name || "view.png", ...guessDirection(f.name || "") });
+  }
+  renderViews();
+}
+
+/** Direction select + elevation input for one image; calls back with clamped values. */
+function directionControls(
+  az0: number,
+  el0: number,
+  onAz: (az: number) => void,
+  onEl: (el: number) => void,
+): [HTMLSelectElement, HTMLInputElement] {
+  const az = document.createElement("select");
+  az.title = "Azimuth: where the camera was, going around the object";
+  for (const [deg, label] of AZIMUTHS) az.add(new Option(`${label} · ${deg}°`, String(deg)));
+  if (!AZIMUTHS.some(([deg]) => deg === az0)) az.add(new Option(`${az0}°`, String(az0)));
+  az.value = String(az0);
+  az.addEventListener("change", () => onAz(parseFloat(az.value)));
+
+  const el = document.createElement("input");
+  el.type = "number";
+  el.min = "-90";
+  el.max = "90";
+  el.step = "15";
+  el.value = String(el0);
+  el.title = "Elevation in degrees (90 = from above, -90 = from below)";
+  el.addEventListener("change", () => {
+    const e = Math.max(-90, Math.min(90, parseFloat(el.value) || 0));
+    el.value = String(e);
+    onEl(e);
+  });
+  return [az, el];
+}
+
+function azLabel(az: number): string {
+  return `${AZIMUTHS.find(([deg]) => deg === az)?.[1] ?? "view"} · ${az}°`;
+}
+
+function updateFrontTag(): void {
+  frontTag.textContent = `main · ${azLabel(mainAz)}${mainEl ? `, ${mainEl}° up` : ""}`;
+  frontTag.classList.toggle("hidden", extraViews.length === 0 || !inputImage);
+}
+
+function renderViews(): void {
+  viewUrls.forEach((u) => URL.revokeObjectURL(u));
+  viewUrls = [];
+  viewsList.innerHTML = "";
+  if (extraViews.length) {
+    viewsList.innerHTML = `<div class="vhead"><span></span><span>direction</span><span>elev °</span><span></span></div>`;
+    // The main image's own direction (default front, level): the other views are
+    // placed relative to the object the same way.
+    const row = document.createElement("div");
+    row.className = "vrow vmain";
+    row.title = `${inputName} (main image)`;
+    const img = document.createElement("img");
+    if (inputImage) {
+      const url = URL.createObjectURL(inputImage);
+      viewUrls.push(url);
+      img.src = url;
+    }
+    img.alt = "main image";
+    row.appendChild(img);
+    const [az, el] = directionControls(mainAz, mainEl,
+      (a) => { mainAz = a; updateFrontTag(); },
+      (e) => { mainEl = e; updateFrontTag(); });
+    row.append(az, el);
+    const tag = document.createElement("span");
+    tag.className = "vmain-tag";
+    tag.textContent = "main";
+    row.appendChild(tag);
+    viewsList.appendChild(row);
+  }
+  extraViews.forEach((v, i) => {
+    const row = document.createElement("div");
+    row.className = "vrow";
+    row.title = v.name;
+
+    const img = document.createElement("img");
+    const url = URL.createObjectURL(v.image);
+    viewUrls.push(url);
+    img.src = url;
+    img.alt = v.name;
+    row.appendChild(img);
+
+    const [az, el] = directionControls(v.az, v.el,
+      (a) => (extraViews[i].az = a),
+      (e) => (extraViews[i].el = e));
+    row.append(az, el);
+
+    const del = document.createElement("button");
+    del.className = "vdel";
+    del.type = "button";
+    del.textContent = "✕";
+    del.title = "Remove this view";
+    del.addEventListener("click", () => {
+      extraViews.splice(i, 1);
+      renderViews();
+    });
+    row.appendChild(del);
+
+    viewsList.appendChild(row);
+  });
+  const multi = extraViews.length > 0;
+  updateFrontTag();
+  clearViewsBtn.classList.toggle("hidden", !multi);
+  mvAdv.classList.toggle("hidden", !multi);
+  addViewBtn.disabled = extraViews.length + 1 >= MAX_VIEWS;
+  generateBtn.textContent = multi ? `Generate 3D · ${extraViews.length + 1} views` : "Generate 3D";
+}
+
+addViewBtn.addEventListener("click", () => viewInput.click());
+viewInput.addEventListener("change", () => {
+  addViews(Array.from(viewInput.files ?? []));
+  viewInput.value = "";
+});
+clearViewsBtn.addEventListener("click", () => {
+  extraViews = [];
+  renderViews();
+});
+["dragenter", "dragover"].forEach((ev) =>
+  viewsEl.addEventListener(ev, (e) => {
+    e.preventDefault();
+    viewsEl.classList.add("drag");
+  }),
+);
+viewsEl.addEventListener("dragleave", (e) => {
+  if (!viewsEl.contains((e as DragEvent).relatedTarget as Node | null)) viewsEl.classList.remove("drag");
+});
+viewsEl.addEventListener("drop", (e) => {
+  e.preventDefault();
+  viewsEl.classList.remove("drag");
+  addViews(Array.from((e as DragEvent).dataTransfer?.files ?? []));
+});
 
 dropzone.addEventListener("click", () => fileInput.click());
 dropzone.addEventListener("keydown", (e) => {
   if ((e as KeyboardEvent).key === "Enter") fileInput.click();
 });
 fileInput.addEventListener("change", () => {
-  const f = fileInput.files?.[0];
-  if (f) setInput(f, f.name);
+  const files = Array.from(fileInput.files ?? []);
+  if (files[0]) setInput(files[0], files[0].name);
+  // several files picked at once: the first is the front, the rest extra views
+  if (files.length > 1) addViews(files.slice(1));
+  fileInput.value = "";
 });
 // HTML5 drag-and-drop. In Tauri this needs `dragDropEnabled: false` on the
 // window (tauri.conf.json): otherwise the webview's native file-drop handler
@@ -121,10 +316,13 @@ dropzone.addEventListener("dragleave", (e) => {
 dropzone.addEventListener("drop", (e) => {
   e.preventDefault();
   dropzone.classList.remove("drag");
-  const f = (e as DragEvent).dataTransfer?.files?.[0];
+  const files = Array.from((e as DragEvent).dataTransfer?.files ?? []);
+  const f = files[0];
   if (!f) return;
   if (isImage(f)) setInput(f, f.name);
   else toast(`"${f.name}" isn't an image — drop a PNG, JPEG or WebP.`, "err");
+  // several files dropped at once: the first is the front, the rest extra views
+  if (files.length > 1) addViews(files.slice(1));
 });
 window.addEventListener("paste", async (e: ClipboardEvent) => {
   for (const item of e.clipboardData?.items ?? []) {
@@ -220,6 +418,7 @@ async function finishRecord(rec: GenRecord, glb: Blob): Promise<void> {
   rec.glb = glb;
   rec.pending = false;
   delete rec.jobId;
+  const nViews = rec.views?.length ?? 0;
   const stem = rec.name.replace(/\.[^.]+$/, "") || "model";
 
   // 1) Write the GLB to the output folder FIRST. This on-disk file is the real
@@ -230,7 +429,8 @@ async function finishRecord(rec: GenRecord, glb: Blob): Promise<void> {
   if (isTauri()) {
     try {
       const bytes = new Uint8Array(await glb.arrayBuffer());
-      const fname = `${stem}_${rec.params.resolution}_seed${rec.params.seed}_${rec.id}.glb`;
+      const mv = nViews ? `_mv${nViews + 1}` : "";
+      const fname = `${stem}_${rec.params.resolution}${mv}_seed${rec.params.seed}_${rec.id}.glb`;
       savedPath = await saveToOutputDir(fname, bytes);
     } catch (e) {
       toast(`Auto-save to output folder failed: ${(e as Error).message}`, "err");
@@ -258,7 +458,8 @@ async function finishRecord(rec: GenRecord, glb: Blob): Promise<void> {
   currentName = stem;
   activeId = rec.id;
   setViewerTools(true);
-  viewerCaption.textContent = `${rec.params.resolution} · seed ${rec.params.seed} · ${(glb.size / 1e6).toFixed(1)} MB`;
+  viewerCaption.textContent =
+    `${rec.params.resolution}${viewsLabel(nViews)} · seed ${rec.params.seed} · ${(glb.size / 1e6).toFixed(1)} MB`;
   await refreshGallery();
 
   // 3) Best-effort 3D preview + gallery thumbnail — never blocks the save above.
@@ -278,16 +479,18 @@ async function finishRecord(rec: GenRecord, glb: Blob): Promise<void> {
 async function doGenerate(): Promise<void> {
   if (!inputImage || generating) return;
   const params = readParams();
+  const views = extraViews.map((v) => ({ ...v }));
   const rec: GenRecord = {
     id: newId(),
     ts: Date.now(),
     name: inputName,
     params,
     input: inputImage,
+    views: views.length ? views : undefined,
     glb: null,
     thumb: null,
   };
-  await runJob(rec, (signal, hooks) => generate(rec.input, params, signal, hooks));
+  await runJob(rec, (signal, hooks) => generate(rec.input, params, views, signal, hooks));
 }
 
 /** Pick up jobs that were still running on the server when the page was closed. */
@@ -320,6 +523,11 @@ saveGlbBtn.addEventListener("click", async () => {
   if (ok) toast("Saved", "ok");
 });
 
+/** " · N views" for a generation with extra views, "" for a single image. */
+function viewsLabel(extra: number): string {
+  return extra ? ` · ${extra + 1} views` : "";
+}
+
 // ---- gallery ----
 async function loadRecord(id: string): Promise<void> {
   const rec = await getRecord(id);
@@ -341,11 +549,14 @@ async function loadRecord(id: string): Promise<void> {
   inputPreview.classList.remove("hidden");
   dropHint.classList.add("hidden");
   applyParams(rec.params);
+  extraViews = (rec.views ?? []).map((v) => ({ ...v }));
+  renderViews();
   currentGlb = rec.glb;
   currentName = rec.name.replace(/\.[^.]+$/, "") || "model";
   activeId = rec.id;
   setViewerTools(true);
-  viewerCaption.textContent = `${rec.name} · ${rec.params.resolution} · seed ${rec.params.seed}`;
+  viewerCaption.textContent =
+    `${rec.name} · ${rec.params.resolution}${viewsLabel(rec.views?.length ?? 0)} · seed ${rec.params.seed}`;
   updateGenerateEnabled();
   await refreshGallery();
 }
@@ -373,7 +584,9 @@ async function refreshGallery(): Promise<void> {
 
     const meta = document.createElement("div");
     meta.className = "gmeta";
-    meta.textContent = r.pending ? "generating…" : `${r.params.resolution}`;
+    meta.textContent = r.pending
+      ? "generating…"
+      : `${r.params.resolution}${r.views?.length ? ` · ${r.views.length + 1}v` : ""}`;
     item.appendChild(meta);
 
     const delBtn = document.createElement("button");
