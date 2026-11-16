@@ -25,6 +25,94 @@ export async function health(timeoutMs = 2000): Promise<boolean> {
   }
 }
 
+/**
+ * EXIF orientation of a JPEG (1 = upright; 0 = no tag / not parseable). Only the
+ * APP1 segment near the file start is read.
+ */
+async function jpegOrientation(image: Blob): Promise<number> {
+  const b = new DataView(await image.slice(0, 128 * 1024).arrayBuffer());
+  let off = 2;
+  while (off + 4 <= b.byteLength && b.getUint8(off) === 0xff) {
+    const marker = b.getUint8(off + 1);
+    const len = b.getUint16(off + 2);
+    if (marker === 0xda) break; // start of scan: no more metadata
+    if (marker === 0xe1 && off + 10 <= b.byteLength && b.getUint32(off + 4) === 0x45786966) {
+      const tiff = off + 10; // "Exif\0\0" then the TIFF header
+      if (tiff + 8 > b.byteLength) return 0;
+      const le = b.getUint16(tiff) === 0x4949;
+      const ifd = tiff + b.getUint32(tiff + 4, le);
+      if (ifd + 2 > b.byteLength) return 0;
+      const n = b.getUint16(ifd, le);
+      for (let i = 0; i < n; i++) {
+        const e = ifd + 2 + i * 12;
+        if (e + 12 > b.byteLength) return 0;
+        if (b.getUint16(e, le) === 0x0112) return b.getUint16(e + 8, le);
+      }
+      return 0;
+    }
+    off += 2 + len;
+  }
+  return 0;
+}
+
+/**
+ * Can trellis-server read these bytes as-is? It decodes with stb_image (PNG,
+ * JPEG, BMP, GIF, TGA, PSD, HDR, PNM). Those are sent untouched: re-encoding
+ * would premultiply alpha on cut-out edges, apply ICC profiles the CLI ignores,
+ * and inflate uploads; TGA/PSD/HDR/PNM can't even be decoded by a browser.
+ */
+async function serverReadable(image: Blob): Promise<boolean> {
+  const h = new Uint8Array(await image.slice(0, 16).arrayBuffer());
+  const ascii = String.fromCharCode(...h);
+  if (h[0] === 0x89 && ascii.slice(1, 4) === "PNG") return true;
+  if (h[0] === 0xff && h[1] === 0xd8 && h[2] === 0xff) {
+    // stb_image ignores EXIF rotation: let the browser apply it to rotated photos.
+    return (await jpegOrientation(image)) <= 1;
+  }
+  if (ascii.startsWith("GIF8") || ascii.startsWith("BM") || ascii.startsWith("8BPS")) return true;
+  if (ascii.startsWith("#?RADIANCE") || ascii.startsWith("#?RGBE")) return true;
+  if (/^P[56]\s/.test(ascii)) return true;
+  // TGA has no magic number: trust the file name / type.
+  const name = image instanceof File ? image.name : "";
+  return /\.(tga|tpic)$/i.test(name) || /tga|targa/i.test(image.type);
+}
+
+/** The image as the server should receive it: untouched when readable, else PNG. */
+export async function prepareImage(image: Blob): Promise<Blob> {
+  return (await serverReadable(image)) ? image : toPng(image);
+}
+
+/**
+ * Re-encode an image as PNG in the browser, for formats stb_image can't read
+ * (WebP, AVIF, SVG...) and for EXIF-rotated JPEGs (<img> applies the rotation).
+ */
+export async function toPng(image: Blob): Promise<Blob> {
+  const url = URL.createObjectURL(image);
+  try {
+    const img = new Image();
+    img.src = url;
+    try {
+      await img.decode();
+    } catch {
+      throw new Error("this image format can't be decoded — use a PNG, JPEG or WebP file");
+    }
+    // An SVG without width/height has no intrinsic size.
+    const w = img.naturalWidth || 1024;
+    const h = img.naturalHeight || 1024;
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("canvas unavailable");
+    ctx.drawImage(img, 0, 0, w, h);
+    const png = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!png) throw new Error("could not convert the image to PNG");
+    return png;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 /** trellis-server maps bg_removal: "auto" keeps the server default (no field). */
 function toForm(image: Blob, p: GenParams): FormData {
   const fd = new FormData();
@@ -94,7 +182,8 @@ export async function generate(
   signal?: AbortSignal,
   hooks: GenerateHooks = {},
 ): Promise<GenerateResult> {
-  const form = () => toForm(image, params);
+  const img = await prepareImage(image);
+  const form = () => toForm(img, params);
   const url = await base();
 
   const sub = await fetch(`${url}/jobs`, { method: "POST", body: form(), signal });
