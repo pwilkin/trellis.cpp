@@ -90,6 +90,18 @@ std::vector<unsigned char> threshold_cutout(const std::string& path, int& sz) {
     return crop;
 }
 
+std::vector<unsigned char> load_cutout(const std::string& path, int& sz) {
+    int W, H, ch;
+    sz = 0;
+    unsigned char* img = stbi_load(path.c_str(), &W, &H, &ch, 4);
+    if (!img) { fprintf(stderr, "preprocess: cannot load cutout %s\n", path.c_str()); return {}; }
+    std::vector<unsigned char> out;
+    if (W == H && W > 0) { out.assign(img, img + (size_t)W * H * 4); sz = W; }
+    else fprintf(stderr, "preprocess: cutout %s is %dx%d, expected a square image\n", path.c_str(), W, H);
+    stbi_image_free(img);
+    return out;
+}
+
 std::vector<float> preprocess_image(const std::string& path, int S) {
     int sz;
     std::vector<unsigned char> crop = threshold_cutout(path, sz);

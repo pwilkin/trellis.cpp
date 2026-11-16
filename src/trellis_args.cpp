@@ -156,6 +156,8 @@ void print_usage(const char* argv0, bool server) {
         "      --normal-map on|off bake a tangent-space normal map from the dense remeshed\n"
         "                          shell onto the decimated mesh (3rd GLB texture; default off)\n"
         "      --dump-bg           also write the background-removal cutout as <out>_cutout.png\n"
+        "      --cutout PATH       skip background removal and use this prepared cutout, a square\n"
+        "                          RGBA PNG as written by --dump-bg for the same image\n"
         "      --dump-post PATH    write the raw decoded mesh + sparse PBR volume to PATH and\n"
         "                          exit (skips remesh/decimate/UV/bake/GLB) -- for external\n"
         "                          post-processing pipelines\n"
@@ -259,6 +261,7 @@ bool parse_args(int argc, char** argv, TrellisParams& p) {
                                                   else if (std::strcmp(v,"off")==0 || std::strcmp(v,"0")==0 || std::strcmp(v,"false")==0) p.normal_map = 0;
                                                   else { fprintf(stderr, "[trellis] --normal-map must be on or off\n"); return false; } }
         else if (a == "--dump-bg")              { p.dump_bg = true; }
+        else if (a == "--cutout")               { const char* v = need(a.c_str()); if (!v) return false; p.cutout = v; }
         else if (a == "--bg-only")              { p.bg_only = true; p.dump_bg = true; }
         else if (a == "--retopo")               { const char* g=need(a.c_str()); if (!g) return false;
                                                   const char* f=need(a.c_str()); if (!f) return false;

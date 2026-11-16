@@ -21,6 +21,9 @@ bool image_has_alpha(const std::string& path);
 // bbox-crop and premultiply -> square RGBA uint8 cutout
 // (size returned in `sz`). bm = loaded birefnet model, gpu = device for the deform kernel.
 std::vector<unsigned char> birefnet_cutout(const std::string& path, const Model& bm, int gpu, int& sz);
+// Load a cutout written earlier (--dump-bg): square RGBA uint8, already cropped and
+// premultiplied, so it is returned byte for byte. Empty when unreadable or not square.
+std::vector<unsigned char> load_cutout(const std::string& path, int& sz);
 // Resize a square RGB/RGBA-uint8 cutout to SxS, ImageNet-normalize -> [3,S,S] torch CHW.
 std::vector<float> normalize_cutout(const std::vector<unsigned char>& rgb, int sz, int S);
 
