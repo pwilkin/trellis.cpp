@@ -65,6 +65,53 @@ static void pixal3d_to_trellis_frame(vector<float>& v) {
     }
 }
 
+// [preview] Intermediate results as point clouds, for a front end that wants to show the model
+// forming. Voxel coords become points in the frame of the final GLB (voxel centre in [-0.5,0.5]^3,
+// then the writers' (x,y,z)->(x,z,-y) rotation), so a viewer can overlay them on the result.
+// Each file is announced on stdout as `[preview] <name> <path> points=<n> res=<res>`.
+// `rgb` is optional per-voxel colour in [0,1]. Clouds above the cap are thinned evenly.
+static void write_preview(const trellis::TrellisParams& cfg, const char* name,
+                          const vector<std::array<int,3>>& coords, int res,
+                          const float* rgb, bool pix) {
+    if (cfg.preview_dir.empty() || coords.empty()) return;
+    std::error_code ec;
+    std::filesystem::create_directories(cfg.preview_dir, ec);
+    const size_t total = coords.size();
+    const size_t cap = cfg.preview_points > 0 ? (size_t)cfg.preview_points : total;
+    const size_t n = total < cap ? total : cap;
+    vector<float> xyz(n * 3);
+    vector<unsigned char> col(rgb ? n * 3 : 0);
+    for (size_t k = 0; k < n; ++k) {
+        const size_t i = n == total ? k : (size_t)((double)k * total / n);
+        for (int a = 0; a < 3; ++a) xyz[k*3 + a] = (coords[i][a] + 0.5f) / res - 0.5f;
+        if (rgb) for (int a = 0; a < 3; ++a) {
+            const float c = rgb[i*3 + a];
+            col[k*3 + a] = (unsigned char)(c <= 0 ? 0 : c >= 1 ? 255 : c * 255.0f + 0.5f);
+        }
+    }
+    if (pix) pixal3d_to_trellis_frame(xyz);
+    for (size_t k = 0; k < n; ++k) {
+        const float y = xyz[k*3 + 1], z = xyz[k*3 + 2];
+        xyz[k*3 + 1] = z; xyz[k*3 + 2] = -y;
+    }
+    const std::string path = (std::filesystem::path(cfg.preview_dir) / (std::string(name) + ".ply")).string();
+    const std::string tmp = path + ".tmp";   // rename when complete: a watcher never sees a half file
+    FILE* f = fopen(tmp.c_str(), "wb");
+    if (!f) { fprintf(stderr, "[preview] cannot write %s\n", tmp.c_str()); return; }
+    fprintf(f, "ply\nformat binary_little_endian 1.0\nelement vertex %zu\n"
+               "property float x\nproperty float y\nproperty float z\n", n);
+    if (rgb) fprintf(f, "property uchar red\nproperty uchar green\nproperty uchar blue\n");
+    fprintf(f, "end_header\n");
+    for (size_t k = 0; k < n; ++k) {
+        fwrite(&xyz[k*3], 4, 3, f);
+        if (rgb) fwrite(&col[k*3], 1, 3, f);
+    }
+    fclose(f);
+    std::filesystem::rename(tmp, path, ec);
+    printf("      [preview] %s %s points=%zu res=%d\n", name, path.c_str(), n, res);
+    fflush(stdout);
+}
+
 static void slat_stats(const char* tag, const vector<float>& v) {
     if (v.empty()) { printf("      [stats] %s EMPTY\n", tag); return; }
     double s = 0, s2 = 0; float mn = 0, mx = 0; bool first = true; size_t bad = 0;
@@ -391,10 +438,30 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         trellis::DitRunner* run = trellis::make_dense_runner(m, p, 16, Lc);
         trellis::FlowFwd fwd = [&](const vector<float>& x, float ts, const trellis::FlowCond& c){ return run->forward(x, ts, c); };
         trellis::SamplerParams sp; sp.steps=(cfg.steps>0?cfg.steps:12); sp.guidance_strength=cfg.gss; sp.guidance_rescale=0.7f; sp.gi0=0.6f; sp.gi1=1.0f; sp.rescale_t=5.0f;
+        // [preview] decode the predicted structure after every step. The decoder is small, so it
+        // sits next to the flow model for the duration of the sampling. Not on HTP, where this
+        // decoder has to run on the CPU (see below).
+        trellis::Model prev_dec; bool prev_on = false;
+        if (!cfg.preview_dir.empty() && !backend_is_htp(requested_backend)) {
+            prev_dec = trellis::Model::load(M + "/ss_dec.gguf", gpu); prev_on = true;
+            sp.on_x0 = [&](int step, int steps, const vector<float>& x0) {
+                // The last step is skipped: the `coarse` cloud follows straight after it.
+                // Default schedule is the powers of two, dense where the shape still changes.
+                const bool due = cfg.preview_every > 0 ? step % cfg.preview_every == 0
+                                                       : (step & (step - 1)) == 0;
+                if (!due || step == steps) return;
+                vector<float> zd(8*4096);
+                for (int c = 0; c < 8; ++c) for (int t = 0; t < 4096; ++t) zd[(size_t)c*4096 + t] = x0[c + 8*t];
+                const vector<float> lg = trellis::ss_decode(prev_dec, zd);
+                char nm[32]; snprintf(nm, sizeof nm, "ss_step_%02d", step);
+                write_preview(cfg, nm, trellis::ss_coords(lg, 64, 64), 64, nullptr, pix);
+            };
+        }
         vector<float> z = trellis::sample_flow(fwd, noise(8*4096),
                               trellis::FlowCond(cond.data(), pix ? pc.proj.data()     : nullptr),
                               trellis::FlowCond(neg.data(),  nullptr), sp);  // [8,4096] ne0=8
         delete run; m.free();
+        if (prev_on) prev_dec.free();
         // transpose [8,L] -> torch [8,16,16,16] memory (c*4096 + sp)
         vector<float> zdec(8*4096);
         for (int c = 0; c < 8; ++c) for (int sp2 = 0; sp2 < 4096; ++sp2) zdec[(size_t)c*4096 + sp2] = z[c + 8*sp2];
@@ -407,6 +474,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         trellis::g_backend = saved_backend;
         vector<float> logits = trellis::ss_decode(d, zdec); d.free();
         coords = trellis::ss_coords(logits, 64, 32);
+        write_preview(cfg, "coarse", trellis::ss_coords(logits, 64, 64), 64, nullptr, pix);
     }
     if (cfg.voxply) { FILE*f=fopen("out/myvox.ply","wb"); fprintf(f,"ply\nformat binary_little_endian 1.0\nelement vertex %zu\nproperty float x\nproperty float y\nproperty float z\nelement face 0\nproperty list uchar int vertex_indices\nend_header\n",coords.size()); for(auto&c:coords){float p[3]={(c[0]+0.5f)/32-0.5f,(c[1]+0.5f)/32-0.5f,(c[2]+0.5f)/32-0.5f}; fwrite(p,4,3,f);} fclose(f); }
     printf("      active voxels @res32 = %d\n", (int)coords.size());
@@ -427,7 +495,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
     // They are ignored in TRELLIS.2 mode.
     auto shape_flow = [&](const std::string& path, const vector<std::array<int,3>>& cds,
                           const float* cnd, const float* ncnd, int lc,
-                          int grid_res, int S, int naf_out) {
+                          int grid_res, int S, int naf_out, const char* pv_name) {
         const int n = (int)cds.size();
         trellis::Model m = trellis::Model::load(path, gpu);
         trellis::DiTParams p; p.in_ch = 32; p.out_ch = 32; p.d_cond = 1024; p.cast_f32 = F32;
@@ -437,10 +505,43 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         trellis::DitRunner* run = trellis::make_sparse_runner(m, p, cds, lc);
         trellis::FlowFwd fwd = [&](const vector<float>& x, float ts, const trellis::FlowCond& c){ return run->forward(x, ts, c); };
         trellis::SamplerParams sp; sp.steps=(cfg.steps>0?cfg.steps:12); sp.guidance_strength=cfg.gsh; sp.guidance_rescale=0.5f; sp.gi0=0.6f; sp.gi1=1.0f; sp.rescale_t=3.0f;
+        // [preview] decode the predicted latent between steps, but only the first up-blocks of the
+        // decoder: enough for a cloud at --preview-shape-res, a fraction of the full decode. The
+        // decoder stays loaded next to the flow model while this stage samples.
+        trellis::Model prev_dec; bool prev_on = false, prev_loaded = false;
+        if (pv_name && !cfg.preview_dir.empty() && cfg.preview_shape_res > grid_res &&
+            !backend_is_htp(requested_backend)) {
+            prev_dec = trellis::Model::load(M + "/shape_dec.gguf", gpu); prev_on = prev_loaded = true;
+            sp.on_x0 = [&, pv_name, grid_res, n](int step, int steps, const vector<float>& x0) {
+                // Default schedule: step 1 for an early first look, then every other step. The
+                // estimate is recognisable from step 1 on and sharpens until the end.
+                const bool due = cfg.preview_every > 0 ? step % cfg.preview_every == 0
+                                                       : step == 1 || step % 2 == 0;
+                if (!prev_on || !due || step == steps) return;   // the last step is the stage result
+                vector<float> dn(x0.size());
+                for (int i = 0; i < n; ++i) for (int c = 0; c < 32; ++c)
+                    dn[(size_t)c + 32*i] = x0[(size_t)c + 32*i]*SHAPE_STD[c] + SHAPE_MEAN[c];
+                try {
+                    const auto t0 = std::chrono::steady_clock::now();
+                    int res = grid_res;
+                    const auto pc = trellis::shape_upsample_partial(prev_dec, dn, cds, grid_res,
+                                        cfg.preview_shape_res, /*max_level_voxels=*/250000, &res);
+                    char nm[48]; snprintf(nm, sizeof nm, "%s_%02d", pv_name, step);
+                    fprintf(stderr, "      [preview] %s: %zu voxels @res%d, decoded in %.1fs\n", nm, pc.size(), res,
+                            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+                    write_preview(cfg, nm, pc, res, nullptr, pix);
+                } catch (const std::exception& e) {
+                    // A preview must never cost the run: drop the remaining ones and carry on.
+                    fprintf(stderr, "      [preview] shape preview failed (%s), skipping the rest\n", e.what());
+                    prev_on = false;
+                }
+            };
+        }
         vector<float> sn = trellis::sample_flow(fwd, noise((size_t)32*n),
                                trellis::FlowCond(cnd,  pix ? pc.proj.data()     : nullptr),
                                trellis::FlowCond(ncnd, nullptr), sp);   // [32,n]
         delete run; m.free();
+        if (prev_loaded) prev_dec.free();
         return sn;
     };
 
@@ -467,7 +568,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         printf("[4/7] shape SLAT flow (LR 512 -> upsample -> HR %d cascade, max_tok=%d)\n", hr_target, max_tok);
         // (1) LR shape flow @res32 with cond_512
         lr_norm = shape_flow(M + FP + "shape_flow_512.gguf", coords, cond.data(), neg.data(), Lc,
-                             /*grid_res=*/32, /*S=*/512, /*naf_out=*/512);
+                             /*grid_res=*/32, /*S=*/512, /*naf_out=*/512, "shape_lr_step");
         lr_dn.resize(lr_norm.size());
         for (size_t n = 0; n < coords.size(); ++n) for (int c = 0; c < 32; ++c)
             lr_dn[(size_t)c + 32*n] = lr_norm[(size_t)c + 32*n]*SHAPE_STD[c] + SHAPE_MEAN[c];
@@ -476,6 +577,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         vector<std::array<int,3>> hr_coords;
         { trellis::Model m = trellis::Model::load(M + "/shape_dec.gguf", gpu);
           hr_coords = trellis::shape_upsample(m, lr_dn, coords); m.free(); }
+        write_preview(cfg, "upsampled", hr_coords, 512, nullptr, pix);
         // (3) quantize res512 -> res(hr_res//16) with the reference's adaptive token-budget backoff:
         //     start at hr_target, step -128 toward the 1024 floor while the unique token count
         //     would exceed max_num_tokens. grid = hr_res//16 is integral since 128/16 = 8
@@ -525,13 +627,13 @@ int trellis_run(const trellis::TrellisParams& cfg) {
                    trellis::pixal3d_cross_res_agreement(dino1024, 1024, dino, 512,
                                                         hr_res / 16, cam, shc));
         slat_norm = shape_flow(M + FP + "shape_flow_1024.gguf", shc, cond1024.data(), neg1024.data(), Lc1024,
-                               /*grid_res=*/hr_res / 16, /*S=*/1024, /*naf_out=*/512);
+                               /*grid_res=*/hr_res / 16, /*S=*/1024, /*naf_out=*/512, "shape_step");
         RES = hr_res; cond_dec = cond1024.data(); neg_dec = neg1024.data(); Lc_dec = Lc1024;
     } else {
         printf("[4/7] shape SLAT flow (512)\n");
         shc = coords;
         slat_norm = shape_flow(M + FP + "shape_flow_512.gguf", coords, cond.data(), neg.data(), Lc,
-                               /*grid_res=*/32, /*S=*/512, /*naf_out=*/512);
+                               /*grid_res=*/32, /*S=*/512, /*naf_out=*/512, "shape_step");
     }
     const int N = (int)shc.size();
     slat_dn.resize(slat_norm.size());
@@ -555,6 +657,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
         trellis::Model m = trellis::Model::load(M + "/shape_dec.gguf", gpu);
         so = trellis::shape_decode(m, slat_dn, shc, RES); m.free();
         printf("      decoded voxels @res%d = %d\n", so.res, (int)so.coords.size());
+        write_preview(cfg, "shape", so.coords, so.res, nullptr, pix);
         mesh = trellis::dual_grid_to_mesh(so);
         // feats7 is consumed by dual_grid_to_mesh and is never referenced again.
         // Release it before the enormous host-side topology passes; on the
@@ -672,6 +775,7 @@ int trellis_run(const trellis::TrellisParams& cfg) {
             for (int k = 0; k < 3; ++k)
                 colors[(size_t)i*3 + k] = pbr6[(size_t)i*6 + k];
         printf("      PBR voxels=%d @res%d\n", Mv, pbr_res);
+        write_preview(cfg, "textured", *pbr_coords, pbr_res, colors.data(), pix);
         if (dual_pbr_path) {
             rng = texture_rng;
             dual_pbr6 = decode_texture(false);

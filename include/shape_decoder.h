@@ -24,6 +24,15 @@ ShapeOut shape_decode(const Model& m, const std::vector<float>& latent,
 std::vector<std::array<int,3>> shape_upsample(const Model& m, const std::vector<float>& latent,
                                               const std::vector<std::array<int,3>>& coords0);
 
+// [preview] shape_upsample that stops early: runs the C2S up-blocks only until the grid reaches
+// `target_res` (coords0 live at `res0`), and gives up one level earlier if a level comes out
+// larger than `max_level_voxels` — the estimate of a half-denoised latent can subdivide almost
+// everywhere. `res_out` receives the resolution the returned coords are expressed in.
+std::vector<std::array<int,3>> shape_upsample_partial(const Model& m, const std::vector<float>& latent,
+                                                      const std::vector<std::array<int,3>>& coords0,
+                                                      int res0, int target_res, size_t max_level_voxels,
+                                                      int* res_out);
+
 // Texture (PBR) decoder: SparseUnetVaeDecoder driven by the shape decoder's `subs` so it grows
 // the IDENTICAL voxel tree. tex_latent: [32*N0]; returns 6-ch PBR [6*M] (channel-major) at the
 // SAME final coords/order as shape_decode (base_color3, metallic, roughness, alpha) — pre *0.5+0.5.

@@ -174,6 +174,12 @@ void print_usage(const char* argv0, bool server) {
         "      --gss F  --gsh F    guidance strengths\n"
         "      --host H  --port P  trellis-server bind address\n"
         "      --voxply            also dump the voxel point cloud as .ply\n"
+        "      --preview-dir DIR   write intermediate point clouds (sampler steps, shape, colour) to DIR\n"
+        "      --preview-points N  cap on points per preview cloud (default 300000)\n"
+        "      --preview-every N   decode every Nth sampler step (default 0 = steps 1,2,4,8 of the\n"
+        "                          sparse-structure flow, steps 1,2,4,6,... of the shape flows)\n"
+        "      --preview-shape-res N  grid of the clouds decoded during the shape flows\n"
+        "                          (default 256, 0 = none)\n"
         "      --dump-slat         dump the structured latent to disk\n"
         "  -h, --help              show this help\n");
 }
@@ -282,6 +288,10 @@ bool parse_args(int argc, char** argv, TrellisParams& p) {
         else if (a == "--host")                 { const char* v = need(a.c_str()); if (!v) return false; p.host = v; }
         else if (a == "--port")                 { const char* v = need(a.c_str()); if (!v) return false; p.port = atoi(v); }
         else if (a == "--voxply")               { p.voxply = true; }
+        else if (a == "--preview-dir")          { const char* v = need(a.c_str()); if (!v) return false; p.preview_dir = v; }
+        else if (a == "--preview-points")       { const char* v = need(a.c_str()); if (!v) return false; p.preview_points = atoi(v); }
+        else if (a == "--preview-every")        { const char* v = need(a.c_str()); if (!v) return false; p.preview_every = atoi(v); }
+        else if (a == "--preview-shape-res")    { const char* v = need(a.c_str()); if (!v) return false; p.preview_shape_res = atoi(v); }
         else if (a == "--dump-slat")            { p.dump_slat = true; }
         else if (!a.empty() && a[0] == '-')     { fprintf(stderr, "[trellis] unknown option: %s\n", a.c_str()); return false; }
         else if (positional == 0)               { p.image  = a; positional = 1; }
