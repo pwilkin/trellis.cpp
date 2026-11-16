@@ -46,6 +46,29 @@ int main() {
         std::fprintf(stderr, "RGBA normalization failed: values=%zu\n", chw.size());
         return 1;
     }
+
+    // A cutout written to disk (--dump-bg) and loaded again (--cutout) must be the same bytes:
+    // no second crop, no second premultiply.
+    const char* cut_path = "/tmp/trellis-preprocess-test-cutout.png";
+    if (!stbi_write_png(cut_path, size, size, 4, cutout.data(), size * 4)) {
+        std::fprintf(stderr, "failed to write the cutout\n");
+        return 1;
+    }
+    int loaded_size = 0;
+    const std::vector<unsigned char> loaded = trellis::load_cutout(cut_path, loaded_size);
+    std::remove(cut_path);
+    if (loaded_size != size || loaded != cutout) {
+        std::fprintf(stderr, "loaded cutout differs from the written one: size=%d\n", loaded_size);
+        return 1;
+    }
+    // Anything that is not square cannot be a cutout.
+    if (!stbi_write_png(cut_path, W, H, 4, rgba.data(), W * 4)) return 1;
+    const std::vector<unsigned char> bad = trellis::load_cutout(cut_path, loaded_size);
+    std::remove(cut_path);
+    if (!bad.empty() || loaded_size != 0) {
+        std::fprintf(stderr, "a %dx%d image was accepted as a cutout\n", W, H);
+        return 1;
+    }
     std::printf("PASS: %dx%d RGBA cutout, %zu normalized values\n", size, size, chw.size());
     return 0;
 }

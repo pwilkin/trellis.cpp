@@ -231,8 +231,9 @@ int trellis_run(const trellis::TrellisParams& cfg) {
     auto noise = [&](size_t n){ vector<float> v(n); for (auto& x : v) x = randn(rng); return v; };
     double t0 = now();
 
-    bool birefnet = cfg.birefnet == 1;
-    if (cfg.birefnet < 0) {
+    const bool prepared = !cfg.cutout.empty();   // --cutout: the matte of an earlier run
+    bool birefnet = !prepared && cfg.birefnet == 1;
+    if (!prepared && cfg.birefnet < 0) {
         // Auto bg-removal. A pre-matted image keeps its own alpha (threshold path uses it
         // as-is). Otherwise prefer the neural matte: the white-threshold rule reads specular
         // highlights (min(RGB)>=232) as background, and conditioning the flow on an object
@@ -249,7 +250,13 @@ int trellis_run(const trellis::TrellisParams& cfg) {
     }
     vector<float> chw, chw1024;
     std::vector<unsigned char> cutout; int cut_sz = 0;   // the bg-removal result (for --dump-bg / --bg-only)
-    if (birefnet) {
+    if (prepared) {
+        printf("[1/6] preprocess %s (prepared cutout, %s)\n", img.c_str(), cascade ? "1024 cascade" : "512");
+        cutout = trellis::load_cutout(cfg.cutout, cut_sz);
+        if (cutout.empty()) return 1;
+        chw = trellis::normalize_cutout(cutout, cut_sz, 512);
+        if (cascade) chw1024 = trellis::normalize_cutout(cutout, cut_sz, 1024);
+    } else if (birefnet) {
         printf("[1/6] preprocess %s (BiRefNet bg removal, %s)\n", img.c_str(), cascade ? "1024 cascade" : "512");
         // Full BiRefNet (Swin-L backbone + deformable-conv decoder) runs on the GPU. Cutout computed
         // once, normalized for 512 and 1024.
