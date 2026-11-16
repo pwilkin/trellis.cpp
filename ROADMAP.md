@@ -74,6 +74,20 @@ last key-tile at the HR token count, ≈53k). BiRefNet bg-removal is done (M2); 
 - ☐ HR-token-count attention scaling (~45k tokens): ggml FA trails flash-attn-varlen ~1.4x
       on same-GPU heavy inputs — upstream ggml or varlen-style path
 
+## M7 — Multi-view and mesh refinement
+- ☑ Variable-N multi-view conditioning (`--view PATH:AZ:EL`, ≤ 12 views): per-token
+      softmax blend of per-view guided velocities in every flow, shared negative (V+1
+      forwards per guided step), geometric axis convention plus `ref-z`/`ref-x` parity presets
+      (spec 30); multi-image `/generate`
+- ☑ `--refine-mesh`: GLB/glTF/OBJ input, o-voxel flexible-dual-grid voxeliser (bit-exact vs
+      upstream), shape SLAT encoder (`shape_enc.gguf`, S2C down-blocks), voxel or encoder
+      coordinates, `/refine` (spec 31)
+- ☐ Pixal3D multi-view (per-view cameras into the projection grid; needs the `_mv` weights)
+- ☐ Texture-only retexturing of an existing mesh (`texture_mesh_multiview`)
+- ☐ Trellis Studio multi-view UI
+- ☑ Server job API (`/jobs`): FIFO queue, poll + fetch, so long runs survive client/proxy
+      response timeouts; Studio uses it and resumes pending jobs after a reload
+
 ## Validation strategy
 Full reference env needs CUDA-only extensions (o-voxel, flash-attn, spconv, nvdiffrast) that
 don't all install here, so we validate **per-component**: dump reference outputs for each module

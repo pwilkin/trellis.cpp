@@ -43,6 +43,10 @@ export interface GenRecord {
   name: string;
   params: GenParams;
   input: Blob; // source image
-  glb: Blob; // resulting model/gltf-binary
+  glb: Blob | null; // resulting model/gltf-binary; null while pending
+  /** true while the server is still working on it (the entry survives reloads). */
+  pending?: boolean;
+  /** trellis-server job id of a pending entry, to resume polling after a reload. */
+  jobId?: string;
   thumb: Blob | null; // model-viewer snapshot for the gallery
 }
