@@ -41,4 +41,24 @@ C2SResult sparse_c2s(const Model& m, const std::string& prefix,
                      const std::vector<std::array<int,3>>& coords, int Cout,
                      const std::vector<uint8_t>* ext_subdiv = nullptr);
 
+// SparseResBlockS2C3d down-block (spatial->channel /2), the encoder's mirror of sparse_c2s:
+//   h = conv1(SiLU(LN_affine(x, 1e-6)))     Cin -> Cout/8 at the fine resolution
+//   h = S2C(h); xs = S2C(x)                 2x2x2 children packed into channels (empty slots 0)
+//   h = conv2(SiLU(LN(h, 1e-6)))            Cout -> Cout at the coarse resolution
+//   out = h + mean over groups of 8*Cin/Cout consecutive channels of xs
+// Parents are coord/2 in lexicographic (x,y,z) order (the reference's unique() of the linear
+// code); child slot s = lx + 2*ly + 4*lz holds fine channel c at s*C + c. Host-orchestrated and
+// streamed in bounded chunks like sparse_c2s (the fine level can be tens of millions of voxels).
+struct S2CResult { std::vector<float> feats; std::vector<std::array<int,3>> coords; int C = 0; };
+S2CResult sparse_s2c(const Model& m, const std::string& prefix,
+                     const std::vector<float>& feats_in, int Cin,
+                     const std::vector<std::array<int,3>>& coords, int Cout);
+
+// Voxel-local streamed ops on host tables [C*N] (bounded GPU working set):
+//   linear: out = W x + b (weight key prefix.weight [Cout, Cin] torch layout, prefix.bias)
+//   norm:   LayerNorm over channels, no affine, eps
+std::vector<float> sparse_linear_streamed(const Model& m, const std::string& prefix,
+                                          const std::vector<float>& feats_in, int Cin, int N);
+std::vector<float> sparse_norm_streamed(const Model& m, const std::vector<float>& feats_in, int C, int N, float eps);
+
 } // namespace trellis

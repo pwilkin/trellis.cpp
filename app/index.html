@@ -34,7 +34,18 @@
             <div>Drop an image here</div>
             <div class="muted">or click to browse</div>
           </div>
-          <input id="file-input" type="file" accept="image/*" hidden />
+          <span id="front-tag" class="front-tag hidden">main · front · 0°</span>
+          <input id="file-input" type="file" accept="image/*" multiple hidden />
+        </div>
+
+        <div id="views" class="views">
+          <div class="views-head">
+            <span>Extra views <span class="muted">· same object, other angles</span></span>
+            <button id="clear-views" class="link-btn hidden">Clear</button>
+          </div>
+          <div id="views-list" class="views-list"></div>
+          <button id="add-view" class="tool-btn add-view" type="button">+ Add view</button>
+          <input id="view-input" type="file" accept="image/*" multiple hidden />
         </div>
 
         <div class="controls">
@@ -72,6 +83,24 @@
             <span>Seed</span>
             <input id="ctl-seed" type="number" min="0" step="1" value="42" />
           </label>
+          <details id="mv-adv" class="adv hidden">
+            <summary>Multi-view blending</summary>
+            <label class="ctl">
+              <span>Blend temperature (higher = each region follows its closest view)</span>
+              <input id="ctl-blend" type="number" min="0.1" max="20" step="0.5" value="2" />
+            </label>
+            <label class="ctl">
+              <span>Front axis</span>
+              <select id="ctl-front">
+                <option value="-y" selected>-y (default)</option>
+                <option value="+y">+y (object faces away)</option>
+                <option value="+x">+x</option>
+                <option value="-x">-x</option>
+                <option value="ref-z">ref-z (ComfyUI compatible)</option>
+                <option value="ref-x">ref-x (ComfyUI compatible)</option>
+              </select>
+            </label>
+          </details>
         </div>
 
         <button id="generate-btn" class="primary" disabled>Generate 3D</button>

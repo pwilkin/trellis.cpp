@@ -67,6 +67,10 @@ MANIFEST = {
                        f"{MODELS}/ckpts/shape_dec_next_dc_f16c32_fp16.json",       "trellis2-shape-dec"),
     "tex_dec":        (f"{MODELS}/ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
                        f"{MODELS}/ckpts/tex_dec_next_dc_f16c32_fp16.json",         "trellis2-tex-dec"),
+    # Optional: only --refine-mesh --refine-coords encoder needs it (docs/spec/31-mesh-refine.md).
+    # Pixal3D ships no encoder and reuses this one, so it is SHARED below.
+    "shape_enc":      (f"{MODELS}/ckpts/shape_enc_next_dc_f16c32_fp16.safetensors",
+                       f"{MODELS}/ckpts/shape_enc_next_dc_f16c32_fp16.json",       "trellis2-shape-enc"),
     "ss_dec":         (f"{MODELS}/tilarge/ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
                        f"{MODELS}/tilarge/ckpts/ss_dec_conv3d_16l8_fp16.json",     "trellis2-ss-dec"),
     "dinov3":         (f"{MODELS}/dinov3/model.safetensors",
@@ -208,7 +212,7 @@ def convert_naf(w, src):
 
 # Components that are byte-identical between the two families and therefore keep their plain
 # name, so one model directory can serve both. Everything else gets a `pixal3d_` prefix.
-SHARED = {"shape_dec", "tex_dec", "ss_dec", "dinov3", "birefnet"}
+SHARED = {"shape_dec", "tex_dec", "ss_dec", "dinov3", "birefnet", "shape_enc"}
 
 
 def out_name(component):
@@ -268,7 +272,10 @@ def convert(component):
 
 
 if __name__ == "__main__":
-    comps = sys.argv[1:] or list(MANIFEST.keys())
+    # Optional components are converted only when named (their checkpoints are not part of the
+    # default download).
+    OPTIONAL = {"shape_enc"}
+    comps = sys.argv[1:] or [c for c in MANIFEST if c not in OPTIONAL]
     print(f"converting {len(comps)} component(s) -> {OUT}")
     for c in comps:
         convert(c)
