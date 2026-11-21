@@ -167,6 +167,7 @@ Other useful CLI flags:
 | `--seed N` | RNG seed |
 | `--model trellis\|pixal3d` | which family of flow weights `--models` holds (see [Pixal3D backend](docs/pixal3d/README.md)) |
 | `--steps N` | flow sampler steps (default 12; lower values are useful for backend bring-up) |
+| `--preview-dir DIR` | write intermediate results as point clouds (binary PLY) to DIR while the run is in progress, so a front end can show the model forming: the predicted structure and shape after sampler steps, the decoded shape, the coloured voxels. Each file is announced on stdout as `[preview] <name> <path> points=<n> res=<res>`. `--preview-points N` caps the cloud size (default 300000), `--preview-every N` picks the sampler steps (default: 1, 2, 4, 8 of the structure flow, 1 and every second step of the shape flows), `--preview-shape-res N` sets the grid of the shape-flow clouds (default 256, `0` = off). Does not change the result |
 | `--backend NAME` | select a registered ggml backend explicitly, such as `HTP`, `Vulkan`, or `CPU` |
 | `--threads N` | CPU threads (defaults to the detected hardware thread count) |
 | `--sched on\|off` | enable multi-backend scheduling; automatic for the partial-coverage HTP backend |

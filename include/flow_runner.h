@@ -25,6 +25,9 @@ struct SamplerParams {
     float gi1               = 1.0f;
     float rescale_t         = 1.0f;
     float sigma_min         = 1e-5f;
+    // [preview] called after every step with the predicted clean sample x0 (same identity the
+    // guidance rescale uses). Lets a caller decode intermediate results for a live preview.
+    std::function<void(int step, int steps, const std::vector<float>& x0)> on_x0;
 };
 
 // One branch of the classifier-free guidance pair. `cond` is the cross-attention context that

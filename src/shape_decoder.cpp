@@ -84,13 +84,18 @@ static std::vector<float> decode_unet(const Model& m, const std::vector<float>& 
                                       std::vector<std::array<int,3>>& coords,
                                       const std::vector<std::vector<uint8_t>>* guide_subs,
                                       std::vector<std::vector<uint8_t>>* subs_out,
-                                      bool coords_only = false) {
+                                      bool coords_only = false,
+                                      int max_stages = 4, size_t max_level_voxels = 0,
+                                      int* stages_done = nullptr) {
     int N = (int)coords.size();
     // from_latent [32,N] -> [1024,N]
     std::vector<float> h = linear_rows(m, latent, 32, N, "from_latent", 1024, false);
     struct Stage { int C, nblk, Cout, c2si; const char* s; };
     const Stage stages[4] = { {1024,4,512,4,"0"}, {512,16,256,16,"1"}, {256,8,128,8,"2"}, {128,4,64,4,"3"} };
-    for (int si = 0; si < 4; ++si) {
+    for (int si = 0; si < 4 && si < max_stages; ++si) {
+        // [preview] partial decode: stop before a level that is empty or over budget
+        if (N == 0 || (max_level_voxels && (size_t)N > max_level_voxels)) break;
+        if (stages_done) *stages_done = si + 1;
         const Stage& st = stages[si];
         std::vector<int32_t> nbr = build_neighbor_table(coords);
         if (getenv("TRELLIS_DBG_MEM"))
@@ -168,6 +173,21 @@ std::vector<std::array<int,3>> shape_upsample(const Model& m, const std::vector<
                                               const std::vector<std::array<int,3>>& coords0) {
     std::vector<std::array<int,3>> coords = coords0;
     decode_unet(m, latent, 7, coords, nullptr, nullptr, /*coords_only=*/true);
+    return coords;
+}
+
+std::vector<std::array<int,3>> shape_upsample_partial(const Model& m, const std::vector<float>& latent,
+                                                      const std::vector<std::array<int,3>>& coords0,
+                                                      int res0, int target_res, size_t max_level_voxels,
+                                                      int* res_out) {
+    int stages = 0;
+    for (int r = res0; r < target_res && stages < 4; r *= 2) ++stages;
+    std::vector<std::array<int,3>> coords = coords0;
+    int done = 0;
+    if (stages > 0)
+        decode_unet(m, latent, 7, coords, nullptr, nullptr, /*coords_only=*/true,
+                    stages, max_level_voxels, &done);
+    if (res_out) *res_out = res0 << done;
     return coords;
 }
 

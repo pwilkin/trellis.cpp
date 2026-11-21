@@ -95,6 +95,11 @@ struct TrellisParams {
     float gss = 7.5f;           // sparse-structure guidance strength
     float gsh = 7.5f;           // shape-SLAT guidance strength
     bool voxply = false;        // dump out/myvox.ply              (debug)
+    std::string preview_dir;    // [preview] write intermediate point clouds here (--preview-dir DIR)
+    int  preview_points = 300000;   // [preview] cap per cloud (--preview-points N)
+    int  preview_every  = 0;        // [preview] decode every Nth sampler step; 0 = built-in schedule
+    int  preview_shape_res = 256;   // [preview] grid of the clouds decoded during the shape flow; 0 = none
+                                    //   (each decode costs about as much as a sampler step)
     bool dump_slat = false;     // dump /tmp/hr_slat.bin           (debug)
     bool dump_bg = false;       // also write the bg-removal cutout as <out>_cutout.png
     std::string dump_post;      // write the raw decoded mesh + sparse PBR volume to this

@@ -264,6 +264,12 @@ std::vector<float> sample_flow(const FlowFwd& fwd, std::vector<float> sample,
         // Safety net: never integrate a non-finite velocity (one poisoned tap would spread to the
         // whole latent on the next attention). A no-op when everything is finite.
         if (!no_fix) for (size_t k = 0; k < Nst; ++k) if (!std::isfinite(pred[k])) pred[k] = 0.0f;
+        if (sp.on_x0) {   // [preview] x0 = (1-sm)*x_t - (sm + (1-sm)*t)*v, from the pre-step sample
+            const float a = 1 - sm, b = sm + (1 - sm) * t;
+            std::vector<float> x0(Nst);
+            for (size_t k = 0; k < Nst; ++k) x0[k] = a*sample[k] - b*pred[k];
+            sp.on_x0(i + 1, sp.steps, x0);
+        }
         for (size_t k = 0; k < Nst; ++k) sample[k] -= (t - tprev) * pred[k];
         progress(i + 1);
         if (dbg_step) { size_t pb, sb; double pm, sm2; fstats(pred, pb, pm); fstats(sample, sb, sm2);
