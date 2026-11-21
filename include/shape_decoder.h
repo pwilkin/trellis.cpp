@@ -2,6 +2,7 @@
 #pragma once
 #include <vector>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace trellis {
