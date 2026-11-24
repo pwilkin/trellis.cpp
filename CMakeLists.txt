@@ -94,6 +94,9 @@ add_library(trellis_core STATIC
   src/trellis_model.cpp
   src/dit.cpp
   src/flow_runner.cpp
+  src/multiview.cpp
+  src/mesh_io.cpp
+  src/mesh_voxelize.cpp
   src/ss_decoder.cpp
   src/mesh_glb.cpp
   src/dinov3.cpp
@@ -101,6 +104,7 @@ add_library(trellis_core STATIC
   src/naf.cpp
   src/sparse.cpp
   src/shape_decoder.cpp
+  src/shape_encoder.cpp
   src/dual_grid.cpp
   src/preprocess.cpp
   src/uv_bake.cpp
@@ -119,9 +123,12 @@ add_library(trellis_core STATIC
   src/quad_topology.cpp
   src/quad_component_cover.cpp
 )
-target_include_directories(trellis_core PUBLIC include ${GGML_DIR}/include ${CMAKE_SOURCE_DIR}/thirdparty/stb ${CMAKE_SOURCE_DIR}/thirdparty/xatlas ${CMAKE_SOURCE_DIR}/thirdparty/meshoptimizer ${CMAKE_SOURCE_DIR}/thirdparty/fqms)
+target_include_directories(trellis_core PUBLIC include ${GGML_DIR}/include ${CMAKE_SOURCE_DIR}/thirdparty/cgltf ${CMAKE_SOURCE_DIR}/thirdparty/stb ${CMAKE_SOURCE_DIR}/thirdparty/xatlas ${CMAKE_SOURCE_DIR}/thirdparty/meshoptimizer ${CMAKE_SOURCE_DIR}/thirdparty/fqms)
 target_compile_definitions(trellis_core PRIVATE TRELLIS_GIT_COMMIT="${TRELLIS_GIT_COMMIT}" TRELLIS_GIT_DIRTY=${TRELLIS_GIT_DIRTY} TRELLIS_BUILD_TIMESTAMP="${TRELLIS_BUILD_TIMESTAMP_UTC}" TRELLIS_APP_VERSION="${TRELLIS_APP_VERSION}")
 target_link_libraries(trellis_core PUBLIC ggml ggml-base ggml-cpu)
+# The voxeliser mirrors o-voxel's float arithmetic; FMA contraction (GCC's default on aarch64)
+# flips borderline triangle/box tests and moves dual vertices. Keep it off for portable results.
+set_source_files_properties(src/mesh_voxelize.cpp PROPERTIES COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>")
 
 add_executable(trellis-refine-core tools/mesh_quad_matching/selective_refinement_core.cpp)
 target_link_libraries(trellis-refine-core PRIVATE trellis_core)
@@ -456,6 +463,22 @@ add_executable(trellis-test-shape-dec src/test_shape_dec.cpp)
 target_link_libraries(trellis-test-shape-dec PRIVATE trellis_core)
 set_target_properties(trellis-test-shape-dec PROPERTIES BUILD_RPATH "${GGML_RPATH}")
 
+add_executable(trellis-test-mesh-io src/test_mesh_io.cpp)
+target_link_libraries(trellis-test-mesh-io PRIVATE trellis_core)
+set_target_properties(trellis-test-mesh-io PROPERTIES BUILD_RPATH "${GGML_RPATH}")
+
+add_executable(trellis-test-voxelize src/test_voxelize.cpp)
+target_link_libraries(trellis-test-voxelize PRIVATE trellis_core)
+set_target_properties(trellis-test-voxelize PROPERTIES BUILD_RPATH "${GGML_RPATH}")
+
+add_executable(trellis-test-shape-enc src/test_shape_enc.cpp)
+target_link_libraries(trellis-test-shape-enc PRIVATE trellis_core)
+set_target_properties(trellis-test-shape-enc PROPERTIES BUILD_RPATH "${GGML_RPATH}")
+
+add_executable(trellis-test-multiview src/test_multiview.cpp src/trellis_args.cpp)
+target_link_libraries(trellis-test-multiview PRIVATE trellis_core)
+set_target_properties(trellis-test-multiview PROPERTIES BUILD_RPATH "${GGML_RPATH}")
+
 add_executable(trellis-test-pixal3d src/test_pixal3d.cpp src/trellis_args.cpp)
 target_link_libraries(trellis-test-pixal3d PRIVATE trellis_core)
 set_target_properties(trellis-test-pixal3d PROPERTIES BUILD_RPATH "${GGML_RPATH}")
@@ -484,3 +507,11 @@ set_target_properties(trellis-server PROPERTIES BUILD_RPATH "${GGML_RPATH}")
 add_executable(trellis-test-ss-full src/test_ss_full.cpp)
 target_link_libraries(trellis-test-ss-full PRIVATE trellis_core)
 set_target_properties(trellis-test-ss-full PROPERTIES BUILD_RPATH "${GGML_RPATH}")
+
+# Test oracles built from upstream reference sources (not part of any release). Currently the
+# o-voxel voxeliser parity oracle, tools/ref_voxelize (docs/spec/31-mesh-refine.md):
+#   -DTRELLIS_BUILD_REF_ORACLES=ON -DTRELLIS_OVOXEL_SRC=<TRELLIS.2>/o-voxel/src/convert
+option(TRELLIS_BUILD_REF_ORACLES "Build reference-parity oracles (fetches Eigen)" OFF)
+if(TRELLIS_BUILD_REF_ORACLES)
+  add_subdirectory(tools/ref_voxelize)
+endif()

@@ -32,6 +32,8 @@ $base = 'https://huggingface.co/ilintar/trellis2-gguf/resolve/main'
 $path = if ($Quant) { "$Quant/" } else { '' }
 
 $models = @(
+    # shape_enc.gguf (--refine-mesh --refine-coords encoder) is optional and not published here;
+    # convert it with tools/convert.py shape_enc. Without it --refine-mesh falls back to voxel coords.
     'birefnet.gguf', 'dinov3.gguf',
     'ss_flow.gguf', 'ss_dec.gguf',
     'shape_flow_512.gguf', 'shape_flow_1024.gguf', 'shape_dec.gguf',

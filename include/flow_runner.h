@@ -77,4 +77,20 @@ std::vector<float> sample_flow(const FlowFwd& fwd, std::vector<float> sample,
                                const SamplerParams& sp,
                                std::vector<std::vector<float>>* trace = nullptr);
 
+// Multi-view conditioning (docs/spec/30-multiview.md). Every step runs the guided velocity
+// (guidance interval, CFG, CFG-rescale) once per view and blends the per-view velocities token
+// by token with `weights`, then takes the ordinary Euler step -- the reference
+// FlowEulerMultiViewGuidanceIntervalSampler. All views share one negative (the zero tensor), so
+// it is evaluated once per guided step: V+1 forwards instead of 2V.
+struct MultiViewCond {
+    std::vector<FlowCond> cond;            // one per view
+    FlowCond              neg;             // shared negative (all views use the same zeros)
+    const float*          weights = nullptr;  // [V * n_tok] view-major, from view_weights_*
+    int                   n_tok   = 0;        // sample.size() / n_tok = channels per token
+};
+// V == 1 delegates to sample_flow (bit-identical, weights ignored).
+std::vector<float> sample_flow_mv(const FlowFwd& fwd, std::vector<float> sample,
+                                  const MultiViewCond& mv, const SamplerParams& sp,
+                                  std::vector<std::vector<float>>* trace = nullptr);
+
 } // namespace trellis
