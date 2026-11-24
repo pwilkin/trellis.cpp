@@ -8,7 +8,7 @@
 //                   -> model/gltf-binary, or JSON {"error": "..."} on failure.
 
 import { apiBase, loadConfig } from "./config";
-import { DEFAULT_PARAMS, type ExtraView, type GenParams } from "./types";
+import type { ExtraView, GenParams } from "./types";
 
 async function base(): Promise<string> {
   return apiBase(await loadConfig());
@@ -123,9 +123,8 @@ function toForm(image: Blob, p: GenParams, views: ExtraView[]): FormData {
     views.forEach((v, i) => fd.append("image", v.image, `view${i + 1}.png`));
     fd.append("azimuths", [p.mainAz ?? 0, ...views.map((v) => v.az)].map(String).join(","));
     fd.append("elevations", [p.mainEl ?? 0, ...views.map((v) => v.el)].map(String).join(","));
-    // Only override the server's launch defaults when the user changed them.
-    if (p.blendTemp !== DEFAULT_PARAMS.blendTemp) fd.append("blend_temp", String(p.blendTemp));
-    if (p.frontAxis !== DEFAULT_PARAMS.frontAxis) fd.append("front_axis", p.frontAxis);
+    if (p.blendTempOverride !== undefined) fd.append("blend_temp", String(p.blendTempOverride));
+    if (p.frontAxisOverride) fd.append("front_axis", p.frontAxisOverride);
   }
   fd.append("seed", String(p.seed));
   fd.append("resolution", String(p.resolution));
@@ -193,12 +192,22 @@ export async function generate(
   signal?: AbortSignal,
   hooks: GenerateHooks = {},
 ): Promise<GenerateResult> {
+  const url = await base();
+  if (views.length) {
+    const res = await fetch(`${url}/capabilities`, { signal, cache: "no-store" });
+    if (!res.ok && res.status !== 404 && res.status !== 405) {
+      throw new Error(await errorOf(res, `Could not check server capabilities (HTTP ${res.status}).`));
+    }
+    const capabilities = res.ok ? await res.json().catch(() => null) : null;
+    if (capabilities?.multiview !== true) {
+      throw new Error("Update trellis-server for multi-view generation, or use a single image.");
+    }
+  }
   const pngs = await Promise.all([image, ...views.map((v) => v.image)].map(prepareImage));
   const form = () => toForm(pngs[0], params, views.map((v, i) => ({ ...v, image: pngs[i + 1] })));
-  const url = await base();
 
   const sub = await fetch(`${url}/jobs`, { method: "POST", body: form(), signal });
-  if (sub.status === 404 || sub.status === 405) {
+  if (!views.length && (sub.status === 404 || sub.status === 405)) {
     // Server predates the job API: one synchronous request.
     const res = await fetch(`${url}/generate`, { method: "POST", body: form(), signal });
     if (!res.ok) throw new Error(await errorOf(res, `generation failed (HTTP ${res.status})`));

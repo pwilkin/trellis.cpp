@@ -5,7 +5,7 @@ import { renderSettings } from "./settings";
 import { all, clear as clearStore, del as removeRecord, get as getRecord, isEphemeral, newId, put } from "./store";
 import { isTauri, listen, saveBytes, saveToOutputDir } from "./tauri";
 import { Viewer } from "./viewer";
-import { DEFAULT_PARAMS, MAX_VIEWS, type ExtraView, type GenParams, type GenRecord } from "./types";
+import { DEFAULT_PARAMS, MAX_VIEWS, type ExtraView, type FrontAxis, type GenParams, type GenRecord } from "./types";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -35,6 +35,8 @@ const addViewBtn = $<HTMLButtonElement>("add-view");
 const viewInput = $<HTMLInputElement>("view-input");
 const clearViewsBtn = $("clear-views");
 const mvAdv = $("mv-adv");
+const blendInput = $<HTMLInputElement>("ctl-blend");
+const frontSelect = $<HTMLSelectElement>("ctl-front");
 
 // ---- state ----
 const viewer = new Viewer($("viewer-mount"));
@@ -62,34 +64,29 @@ let viewUrls: string[] = [];
 function readParams(): GenParams {
   const res = parseInt(($("ctl-res") as HTMLSelectElement).value, 10);
   const seed = parseInt(($("ctl-seed") as HTMLInputElement).value, 10);
+  const temperature = blendInput.valueAsNumber;
   return {
     resolution: (res === 512 || res === 1536 ? res : 1024) as GenParams["resolution"],
     seed: isNaN(seed) ? DEFAULT_PARAMS.seed : seed,
     bgRemoval: ($("ctl-bg") as HTMLSelectElement).value as GenParams["bgRemoval"],
     uv: ($("ctl-uv") as HTMLSelectElement).value as GenParams["uv"],
     texture: ($("ctl-tex") as HTMLSelectElement).value !== "off",
-    blendTemp: readBlendTemp(),
-    frontAxis: ($("ctl-front") as HTMLSelectElement).value as GenParams["frontAxis"],
+    blendTempOverride: temperature > 0 ? temperature : undefined,
+    frontAxisOverride: (frontSelect.value as FrontAxis | "") || undefined,
     mainAz,
     mainEl,
   };
 }
 
-function readBlendTemp(): number {
-  const t = parseFloat(($("ctl-blend") as HTMLInputElement).value);
-  return isFinite(t) && t > 0 ? t : DEFAULT_PARAMS.blendTemp;
-}
-
-function applyParams(p: GenParams): void {
+function applyParams(p: GenRecord["params"]): void {
   ($("ctl-res") as HTMLSelectElement).value = String(p.resolution);
   ($("ctl-seed") as HTMLInputElement).value = String(p.seed);
   ($("ctl-bg") as HTMLSelectElement).value = p.bgRemoval;
   ($("ctl-uv") as HTMLSelectElement).value = p.uv;
   // records saved before this option existed have no field: treat as textured
   ($("ctl-tex") as HTMLSelectElement).value = p.texture === false ? "off" : "on";
-  // records saved before multi-view existed have neither field
-  ($("ctl-blend") as HTMLInputElement).value = String(p.blendTemp ?? DEFAULT_PARAMS.blendTemp);
-  ($("ctl-front") as HTMLSelectElement).value = p.frontAxis ?? DEFAULT_PARAMS.frontAxis;
+  blendInput.value = String(p.blendTempOverride ?? (p.blendTemp === 2 ? "" : p.blendTemp) ?? "");
+  frontSelect.value = p.frontAxisOverride ?? (p.frontAxis === "-y" ? "" : p.frontAxis) ?? "";
   mainAz = p.mainAz ?? 0;
   mainEl = p.mainEl ?? 0;
 }
@@ -115,8 +112,6 @@ function setInput(blob: Blob, name: string): void {
 }
 
 // ---- extra views (multi-view conditioning) ----
-// The main image is always the front view (azimuth 0, elevation 0); each extra
-// view is another photo of the same object with its own camera direction.
 const AZIMUTHS: [number, string][] = [
   [0, "front"], [45, "front-right"], [90, "right"], [135, "back-right"],
   [180, "back"], [225, "back-left"], [270, "left"], [315, "front-left"],
@@ -127,11 +122,12 @@ function guessDirection(name: string): { az: number; el: number } {
   const n = name.toLowerCase();
   if (/\btop\b|_top|top_/.test(n)) return { az: 0, el: 90 };
   if (/bottom/.test(n)) return { az: 0, el: -90 };
-  if (/back/.test(n)) return { az: 180, el: 0 };
-  if (/left/.test(n)) return { az: 270, el: 0 };
-  if (/right/.test(n)) return { az: 90, el: 0 };
+  const diagonal = n.match(/(front|back)[\s_.-]*(left|right)/);
+  const direction = diagonal ? `${diagonal[1]}-${diagonal[2]}` : n.match(/front|back|left|right/)?.[0];
+  const preset = AZIMUTHS.find(([, label]) => label === direction);
+  if (preset) return { az: preset[0], el: 0 };
   const used = new Set([mainAz, ...extraViews.map((v) => v.az)]);
-  const az = [180, 90, 270, 45, 135, 225, 315].find((a) => !used.has(a)) ?? 180;
+  const az = [180, 90, 270, 45, 135, 225, 315, 0].find((a) => !used.has(a)) ?? 180;
   return { az, el: 0 };
 }
 
@@ -279,15 +275,24 @@ viewsEl.addEventListener("drop", (e) => {
   addViews(Array.from((e as DragEvent).dataTransfer?.files ?? []));
 });
 
+function setMainFiles(files: File[]): void {
+  const [main, ...others] = files;
+  if (!main) return;
+  if (others.length) {
+    extraViews = [];
+    mainAz = 0;
+    mainEl = 0;
+  }
+  setInput(main, main.name);
+  if (others.length) addViews(others);
+}
+
 dropzone.addEventListener("click", () => fileInput.click());
 dropzone.addEventListener("keydown", (e) => {
   if ((e as KeyboardEvent).key === "Enter") fileInput.click();
 });
 fileInput.addEventListener("change", () => {
-  const files = Array.from(fileInput.files ?? []);
-  if (files[0]) setInput(files[0], files[0].name);
-  // several files picked at once: the first is the front, the rest extra views
-  if (files.length > 1) addViews(files.slice(1));
+  setMainFiles(Array.from(fileInput.files ?? []));
   fileInput.value = "";
 });
 // HTML5 drag-and-drop. In Tauri this needs `dragDropEnabled: false` on the
@@ -319,10 +324,8 @@ dropzone.addEventListener("drop", (e) => {
   const files = Array.from((e as DragEvent).dataTransfer?.files ?? []);
   const f = files[0];
   if (!f) return;
-  if (isImage(f)) setInput(f, f.name);
+  if (isImage(f)) setMainFiles(files);
   else toast(`"${f.name}" isn't an image — drop a PNG, JPEG or WebP.`, "err");
-  // several files dropped at once: the first is the front, the rest extra views
-  if (files.length > 1) addViews(files.slice(1));
 });
 window.addEventListener("paste", async (e: ClipboardEvent) => {
   for (const item of e.clipboardData?.items ?? []) {

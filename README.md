@@ -264,6 +264,7 @@ python tools/convert.py shape_enc` from `ckpts/shape_enc_next_dc_f16c32_fp16.*` 
 
 ```
 GET  /health     -> "ok"
+GET  /capabilities -> {"multiview":true} when the server understands multi-image requests
 POST /generate      multipart/form-data with an "image" file part; optional text
                     fields "seed", "resolution" (512/1024/1536), "bg_removal"
                     (threshold|birefnet), "faces" (QEM face target, >= 1000 or
