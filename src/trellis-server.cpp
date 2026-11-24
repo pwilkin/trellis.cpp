@@ -586,6 +586,9 @@ int main(int argc, char** argv) {
     svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
         res.set_content("ok", "text/plain");
     });
+    svr.Get("/capabilities", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(R"({"multiview":true})", "application/json");
+    });
 
     // /generate and /refine: synchronous -- queue the job and hold the connection until it is
     // done. Kept for curl and older clients; a long run can outlast a browser's or proxy's
