@@ -1,5 +1,5 @@
 import "./ui.css";
-import { generate, health } from "./api";
+import { generate, health, waitForJob, type GenerateHooks, type GenerateResult, type JobStatus } from "./api";
 import { loadConfig } from "./config";
 import { renderSettings } from "./settings";
 import { all, clear as clearStore, del as removeRecord, get as getRecord, isEphemeral, newId, put } from "./store";
@@ -34,6 +34,10 @@ const viewer = new Viewer($("viewer-mount"));
 let inputImage: Blob | null = null;
 let inputName = "input.png";
 let currentGlb: Blob | null = null;
+let currentName = "model"; // file name stem for "Save GLB…" of the model in the viewer
+// Set when the user opens a gallery item during a run: the result then goes to the
+// gallery without taking over the viewer.
+let browsedAway = false;
 let activeId: string | null = null;
 let serverOnline = false;
 let generating = false;
@@ -149,87 +153,155 @@ function updateGenerateEnabled(): void {
   generateBtn.disabled = !(serverOnline && inputImage && !generating);
 }
 
-async function doGenerate(): Promise<void> {
-  if (!inputImage || generating) return;
-  const params = readParams();
+function describeJob(s: JobStatus | null): string {
+  if (!s) return "server unreachable — retrying (the job keeps running on the server)…";
+  if (s.status === "queued") {
+    const ahead = (s.position ?? 1) - 1;
+    return ahead > 0 ? `queued — ${ahead} job${ahead > 1 ? "s" : ""} ahead` : "queued — starts next";
+  }
+  if (s.status === "running") return "running on the server…";
+  return s.status;
+}
+
+/**
+ * Run one generation (new, or resumed after a reload) with the progress UI.
+ * `rec` holds everything captured when it started, so browsing the gallery or
+ * changing inputs meanwhile can't leak into the saved result.
+ */
+async function runJob(
+  rec: GenRecord,
+  work: (signal: AbortSignal, hooks: GenerateHooks) => Promise<GenerateResult>,
+): Promise<void> {
   generating = true;
+  browsedAway = false;
   updateGenerateEnabled();
   progress.classList.remove("hidden");
-  progressStage.textContent = "starting…";
+  progressStage.textContent = "sending…";
   const started = Date.now();
   progressElapsed.textContent = "0:00";
   elapsedTimer = window.setInterval(() => {
     progressElapsed.textContent = fmtElapsed(Date.now() - started);
   }, 1000);
   abort = new AbortController();
+  let running = false;
   try {
-    const { glb } = await generate(inputImage, params, abort.signal);
-    currentGlb = glb;
-
-    const rec: GenRecord = {
-      id: newId(),
-      ts: Date.now(),
-      name: inputName,
-      params,
-      input: inputImage,
-      glb,
-      thumb: null,
-    };
-
-    // 1) Write the GLB to the output folder FIRST. This on-disk file is the real
-    // deliverable and must survive any later failure — a dead gallery DB (some
-    // WebKitGTK builds can't open IndexedDB) or a WebGL/model-viewer crash must
-    // never cost the user a successful generation.
-    let savedPath: string | null = null;
-    if (isTauri()) {
-      try {
-        const bytes = new Uint8Array(await glb.arrayBuffer());
-        const base = inputName.replace(/\.[^.]+$/, "") || "model";
-        const fname = `${base}_${params.resolution}_seed${params.seed}_${rec.id}.glb`;
-        savedPath = await saveToOutputDir(fname, bytes);
-      } catch (e) {
-        toast(`Auto-save to output folder failed: ${(e as Error).message}`, "err");
-      }
-    }
-    toast(savedPath ? `Saved to ${savedPath}` : "Generation complete", "ok");
-
-    // 2) Add it to the gallery. The store falls back to in-memory if IndexedDB
-    // is unavailable, so this never throws and never blocks the save above.
-    await put(rec);
-    if (isEphemeral() && !warnedEphemeral) {
-      warnedEphemeral = true;
-      toast(
-        "Gallery won't persist across restarts (IndexedDB unavailable on this system) — " +
-          "but every generation is still saved to your output folder.",
-        "err",
-      );
-    }
-    activeId = rec.id;
-    setViewerTools(true);
-    viewerCaption.textContent = `${params.resolution} · seed ${params.seed} · ${(glb.size / 1e6).toFixed(1)} MB`;
-    await refreshGallery();
-
-    // 3) Best-effort 3D preview + gallery thumbnail — never blocks the save above.
-    try {
-      await viewer.load(glb);
-      const thumb = await viewer.thumbnail();
-      if (thumb) {
-        rec.thumb = thumb;
+    const { glb } = await work(abort.signal, {
+      onJob: async (id) => {
+        // A pending gallery entry: it survives a reload, which resumes the job.
+        rec.jobId = id;
+        rec.pending = true;
         await put(rec);
         await refreshGallery();
-      }
-    } catch (e) {
-      toast(`3D preview couldn't render (your result is still saved): ${(e as Error).message}`, "err");
-    }
+      },
+      onStatus: (st) => {
+        if (st?.status === "running") running = true;
+        progressStage.textContent = describeJob(st);
+      },
+    });
+    await finishRecord(rec, glb);
   } catch (e) {
-    if (abort?.signal.aborted) toast("Generation cancelled");
-    else toast((e as Error).message || "generation failed", "err");
+    await removeRecord(rec.id);
+    await refreshGallery();
+    if (abort?.signal.aborted) {
+      toast(running
+        ? "Cancelled — the server finishes the run already in progress, but its result is discarded."
+        : "Generation cancelled");
+    } else toast((e as Error).message || "generation failed", "err");
   } finally {
     generating = false;
     if (elapsedTimer) window.clearInterval(elapsedTimer);
     progress.classList.add("hidden");
     updateGenerateEnabled();
   }
+}
+
+/** Store a finished generation; show it unless the user is browsing another item. */
+async function finishRecord(rec: GenRecord, glb: Blob): Promise<void> {
+  rec.glb = glb;
+  rec.pending = false;
+  delete rec.jobId;
+  const stem = rec.name.replace(/\.[^.]+$/, "") || "model";
+
+  // 1) Write the GLB to the output folder FIRST. This on-disk file is the real
+  // deliverable and must survive any later failure — a dead gallery DB (some
+  // WebKitGTK builds can't open IndexedDB) or a WebGL/model-viewer crash must
+  // never cost the user a successful generation.
+  let savedPath: string | null = null;
+  if (isTauri()) {
+    try {
+      const bytes = new Uint8Array(await glb.arrayBuffer());
+      const fname = `${stem}_${rec.params.resolution}_seed${rec.params.seed}_${rec.id}.glb`;
+      savedPath = await saveToOutputDir(fname, bytes);
+    } catch (e) {
+      toast(`Auto-save to output folder failed: ${(e as Error).message}`, "err");
+    }
+  }
+
+  // 2) Add it to the gallery. The store falls back to in-memory if IndexedDB
+  // is unavailable, so this never throws and never blocks the save above.
+  await put(rec);
+  if (isEphemeral() && !warnedEphemeral) {
+    warnedEphemeral = true;
+    toast(
+      "Gallery won't persist across restarts (IndexedDB unavailable on this system) — " +
+        "but every generation is still saved to your output folder.",
+      "err",
+    );
+  }
+  if (browsedAway) {
+    toast(`"${rec.name}" finished — it's in the gallery${savedPath ? ` and saved to ${savedPath}` : ""}.`, "ok");
+    await refreshGallery();
+    return;
+  }
+  toast(savedPath ? `Saved to ${savedPath}` : "Generation complete", "ok");
+  currentGlb = glb;
+  currentName = stem;
+  activeId = rec.id;
+  setViewerTools(true);
+  viewerCaption.textContent = `${rec.params.resolution} · seed ${rec.params.seed} · ${(glb.size / 1e6).toFixed(1)} MB`;
+  await refreshGallery();
+
+  // 3) Best-effort 3D preview + gallery thumbnail — never blocks the save above.
+  try {
+    await viewer.load(glb);
+    const thumb = await viewer.thumbnail();
+    if (thumb) {
+      rec.thumb = thumb;
+      await put(rec);
+      await refreshGallery();
+    }
+  } catch (e) {
+    toast(`3D preview couldn't render (your result is still saved): ${(e as Error).message}`, "err");
+  }
+}
+
+async function doGenerate(): Promise<void> {
+  if (!inputImage || generating) return;
+  const params = readParams();
+  const rec: GenRecord = {
+    id: newId(),
+    ts: Date.now(),
+    name: inputName,
+    params,
+    input: inputImage,
+    glb: null,
+    thumb: null,
+  };
+  await runJob(rec, (signal, hooks) => generate(rec.input, params, signal, hooks));
+}
+
+/** Pick up jobs that were still running on the server when the page was closed. */
+async function resumePending(): Promise<void> {
+  for (const r of (await all()).filter((x) => x.pending)) {
+    if (!r.jobId || generating) {
+      if (!r.jobId) await removeRecord(r.id);
+      continue;
+    }
+    toast(`Resuming "${r.name}" — still on the server`);
+    const id = r.jobId;
+    await runJob(r, (signal, hooks) => waitForJob(id, signal, hooks));
+  }
+  await refreshGallery();
 }
 
 generateBtn.addEventListener("click", doGenerate);
@@ -244,8 +316,7 @@ resetViewBtn.addEventListener("click", () => viewer.resetView());
 saveGlbBtn.addEventListener("click", async () => {
   if (!currentGlb) return;
   const bytes = new Uint8Array(await currentGlb.arrayBuffer());
-  const base = inputName.replace(/\.[^.]+$/, "") || "model";
-  const ok = await saveBytes(`${base}.glb`, bytes);
+  const ok = await saveBytes(`${currentName}.glb`, bytes);
   if (ok) toast("Saved", "ok");
 });
 
@@ -253,6 +324,11 @@ saveGlbBtn.addEventListener("click", async () => {
 async function loadRecord(id: string): Promise<void> {
   const rec = await getRecord(id);
   if (!rec) return;
+  if (rec.pending || !rec.glb) {
+    toast("Still generating on the server — it opens here when it's done.");
+    return;
+  }
+  if (generating) browsedAway = true;
   try {
     await viewer.load(rec.glb);
   } catch (e) {
@@ -266,6 +342,7 @@ async function loadRecord(id: string): Promise<void> {
   dropHint.classList.add("hidden");
   applyParams(rec.params);
   currentGlb = rec.glb;
+  currentName = rec.name.replace(/\.[^.]+$/, "") || "model";
   activeId = rec.id;
   setViewerTools(true);
   viewerCaption.textContent = `${rec.name} · ${rec.params.resolution} · seed ${rec.params.seed}`;
@@ -284,7 +361,7 @@ async function refreshGallery(): Promise<void> {
   }
   for (const r of recs) {
     const item = document.createElement("div");
-    item.className = "gitem" + (r.id === activeId ? " active" : "");
+    item.className = "gitem" + (r.id === activeId ? " active" : "") + (r.pending ? " pending" : "");
     item.title = `${r.name} · ${new Date(r.ts).toLocaleString()}`;
 
     const img = document.createElement("img");
@@ -296,7 +373,7 @@ async function refreshGallery(): Promise<void> {
 
     const meta = document.createElement("div");
     meta.className = "gmeta";
-    meta.textContent = `${r.params.resolution}`;
+    meta.textContent = r.pending ? "generating…" : `${r.params.resolution}`;
     item.appendChild(meta);
 
     const delBtn = document.createElement("button");
@@ -308,7 +385,7 @@ async function refreshGallery(): Promise<void> {
       if (activeId === r.id) activeId = null;
       await refreshGallery();
     });
-    item.appendChild(delBtn);
+    if (!r.pending) item.appendChild(delBtn);
 
     item.addEventListener("click", () => loadRecord(r.id));
     galleryEl.appendChild(item);
@@ -376,5 +453,6 @@ async function boot(): Promise<void> {
     // Browser mode: no shell to report a backend.
     backendBadge.textContent = "browser";
   }
+  void resumePending();
 }
 boot();
